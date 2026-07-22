@@ -1,14 +1,12 @@
-import { Hono } from "hono";
-import { initDB } from "./db";
+import { createApp } from "@clawnify/app";
 import { initUploads } from "./uploads";
 import api from "./routes";
 
 type Env = { Bindings: { DB: D1Database; UPLOADS: R2Bucket } };
 
-const app = new Hono<Env>();
+const app = createApp<Env>({ title: "Open Books", version: "1.0.0" });
 
 app.use("*", async (c, next) => {
-  initDB(c.env);
   initUploads(c.env.UPLOADS);
   await next();
 });
