@@ -1,5 +1,7 @@
 # open-books
 
+[![Deploy with Clawnify](https://app.clawnify.com/deploy-button.svg)](https://app.clawnify.com/deploy?repo=clawnify/open-books)
+
 EU-compliance-first, agent-native, open source accounting and tax filing.
 
 A Clawnify template app. React + Hono + D1 on Cloudflare Workers. AGPL-3.0.
