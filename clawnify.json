@@ -1,7 +1,7 @@
 {
   "$schema": "https://app.clawnify.com/schema/v1/clawnify.json",
   "version": 1,
-  "name": "open-books",
+  "name": "OpenBooks",
   "description": "",
   "app": {
     "framework": "react+hono",
