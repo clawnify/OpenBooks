@@ -1,5 +1,3 @@
-DROP TABLE IF EXISTS items;
-
 CREATE TABLE IF NOT EXISTS accounts (
   rgs_code TEXT PRIMARY KEY,
   reknr TEXT,
@@ -135,7 +133,8 @@ CREATE TABLE IF NOT EXISTS company (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-INSERT OR IGNORE INTO company (id) VALUES (1);
+-- The singleton company row is created by the app (ensureCompanyRow in
+-- src/server/domain/company.ts): a deploy applies this file as DDL only.
 
 CREATE TABLE IF NOT EXISTS journal_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
