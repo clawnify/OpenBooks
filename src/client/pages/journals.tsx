@@ -17,6 +17,8 @@ interface JournalEntry {
   source_type: string | null;
   source_id: number | null;
   status: string;
+  reverses_entry_id: number | null;
+  reversed_by_entry_id: number | null;
   posted_at: string;
   lines: JournalLine[];
   total_debit_cents: number;
@@ -67,6 +69,7 @@ export function JournalsPage() {
       </div>
       <p className="text-sm text-gray-500 mb-6">
         Double-entry ledger. Auto-posted from issued invoices and credit notes; debits and credits must balance.
+        A posted entry is never edited or deleted &mdash; a correction is a second, mirror-image entry, and both stay on the record.
       </p>
 
       <div className="flex items-center gap-2 mb-6">
@@ -138,12 +141,26 @@ export function JournalsPage() {
 
 function EntryCard({ entry }: { entry: JournalEntry }) {
   const balanced = entry.total_debit_cents === entry.total_credit_cents;
+  const isReversal = entry.reverses_entry_id !== null;
+  const wasReversed = entry.reversed_by_entry_id !== null;
   return (
-    <div className="border border-gray-100 rounded-lg overflow-hidden">
+    <div className={`border rounded-lg overflow-hidden ${wasReversed ? "border-amber-200" : "border-gray-100"}`}>
       <div className="flex items-baseline gap-3 px-4 py-2 bg-gray-50 border-b border-gray-100">
         <span className="font-mono text-xs text-gray-500">{entry.date}</span>
         <span className="font-mono text-xs text-gray-700">{entry.reference}</span>
-        <span className="text-sm text-gray-700 flex-1 truncate">{entry.description ?? ""}</span>
+        <span className={`text-sm flex-1 truncate ${wasReversed ? "text-gray-400 line-through" : "text-gray-700"}`}>
+          {entry.description ?? ""}
+        </span>
+        {wasReversed && (
+          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">
+            reversed by #{entry.reversed_by_entry_id}
+          </span>
+        )}
+        {isReversal && (
+          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">
+            reverses #{entry.reverses_entry_id}
+          </span>
+        )}
         <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${balanced ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
           {balanced ? entry.status : "imbalanced"}
         </span>

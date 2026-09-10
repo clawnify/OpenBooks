@@ -18,6 +18,9 @@ import {
   type InvoiceType,
 } from "./domain/invoices";
 import { getCompany, updateCompany } from "./domain/company";
+import { actorOf, listAudit } from "./domain/audit";
+import { LedgerError } from "./domain/errors";
+import { listPeriods, lockPeriod } from "./domain/periods";
 import { backfillFromInvoices, getEntry, listEntries, trialBalance } from "./domain/journals";
 import { balanceSheet, profitLoss } from "./domain/reports";
 import { COUNTRY_VAT, computeVat, EU_MEMBER_STATES } from "./domain/vat";
@@ -26,6 +29,18 @@ import { PdfRenderError, renderPDF, type PdfEnv } from "./exports/pdf";
 import { renderInvoiceUBL } from "./exports/ubl";
 
 const api = new Hono();
+
+// A refused write is not a server fault -- it is the books saying no. Turned
+// into a 409 here so every route reports it the same way, with the message the
+// domain wrote (agents call these routes directly and act on that text).
+api.use("*", async (c, next) => {
+  try {
+    await next();
+  } catch (err) {
+    if (err instanceof LedgerError) return c.json({ error: err.message }, 409);
+    throw err;
+  }
+});
 
 api.get("/api/accounts", async (c) => {
   const bw = c.req.query("bw");
@@ -229,7 +244,7 @@ api.patch("/api/invoices/:id", async (c) => {
 });
 
 api.post("/api/invoices/:id/issue", async (c) => {
-  const inv = await issueInvoice(Number(c.req.param("id")));
+  const inv = await issueInvoice(Number(c.req.param("id")), actorOf(c));
   if (!inv) return c.json({ error: "Not found" }, 404);
   return c.json(inv);
 });
@@ -276,7 +291,7 @@ api.get("/api/journals/:id", async (c) => {
 });
 
 api.post("/api/journals/backfill", async (c) => {
-  return c.json(await backfillFromInvoices());
+  return c.json(await backfillFromInvoices(actorOf(c)));
 });
 
 api.get("/api/reports/trial-balance", async (c) => {
@@ -299,14 +314,40 @@ api.get("/api/reports/balance-sheet", async (c) => {
 api.post("/api/invoices/:id/status", async (c) => {
   const id = Number(c.req.param("id"));
   const { status } = await c.req.json<{ status: InvoiceStatus }>();
-  const inv = await setStatus(id, status);
+  const inv = await setStatus(id, status, actorOf(c));
   if (!inv) return c.json({ error: "Not found" }, 404);
   return c.json(inv);
 });
 
 api.delete("/api/invoices/:id", async (c) => {
-  await deleteInvoice(Number(c.req.param("id")));
+  await deleteInvoice(Number(c.req.param("id")), actorOf(c));
   return c.json({ ok: true });
+});
+
+api.get("/api/periods", async (c) => {
+  return c.json(await listPeriods());
+});
+
+api.post("/api/periods/:year/:month/lock", async (c) => {
+  const period = await lockPeriod(
+    Number(c.req.param("year")),
+    Number(c.req.param("month")),
+    actorOf(c),
+  );
+  return c.json(period);
+});
+
+api.get("/api/audit", async (c) => {
+  const entity = c.req.query("entity") || undefined;
+  const entityIdStr = c.req.query("entity_id");
+  const limitStr = c.req.query("limit");
+  return c.json(
+    await listAudit({
+      entity,
+      entity_id: entityIdStr ? Number(entityIdStr) : undefined,
+      limit: limitStr ? Number(limitStr) : undefined,
+    }),
+  );
 });
 
 api.get("/api/vat/countries", (c) => {

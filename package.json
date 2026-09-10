@@ -8,7 +8,7 @@
     "deploy": "clawnify deploy"
   },
   "dependencies": {
-    "@clawnify/app": "^0.1.0",
+    "@clawnify/app": "^0.2.1",
     "@clawnify/db": "^0.4.1",
     "@hono/zod-openapi": "^0.18.0",
     "hono": "^4.13.7",

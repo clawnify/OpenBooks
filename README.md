@@ -25,6 +25,7 @@ Every SMB needs compliant accounting software. The existing open-source options 
 - **Editable invoice editor** with inline line CRUD, product picker, RGS account assignment, server-side recompute on every change.
 - **HTML preview + PDF download + Peppol BIS Billing 3.0 UBL export** — including correct `AE` tax category and `VATEX-EU-AE` exemption code for reverse charge invoices.
 - **Pluggable PDF backends** — Clawnify-managed (Browser Rendering proxy), direct `BROWSER` binding, or a Gotenberg sidecar.
+- **Audit-proof ledger** — a posted entry is never edited or deleted. Corrections are booked as a mirror-image reversal, so the original and its correction both stay on the record and the trial balance still nets out. Posted invoices are frozen against edits, months can be locked closed, and every change to the books is recorded with who made it — a person, or an agent acting on its own.
 
 ## What's next
 
@@ -32,7 +33,7 @@ Roughly in order:
 
 - **CI XSD validation** of generated UBL via `libxml2-wasm` against the Peppol BIS Billing 3.0 schema.
 - **Settings page** to fill in company name / VAT / KVK / IBAN (currently API-only).
-- **Double-entry bookkeeping engine** — journals, period close, P&L, balance sheet (Phase 2).
+- **Accountant handoff** — export the locked periods to the formats a bookkeeper's software actually ingests, plus a read-only share so they can look without an account.
 - **VAT returns + iXBRL** — BTW-aangifte and ICP, generated against the Nederlandse Taxonomie (Phase 3).
 - **Country plugins** as separate repos: `open-books-fr`, `open-books-de`, `open-books-it`.
 - **FatturaPA** XML for IT.

@@ -1,6 +1,9 @@
 import { get, query, run } from "../db";
+import { record, type Actor } from "./audit";
 import { getCompany } from "./company";
-import { createFromInvoice as createJournalFromInvoice, deleteEntriesForInvoice } from "./journals";
+import { LedgerError } from "./errors";
+import { assertPeriodOpen } from "./periods";
+import { createFromInvoice as createJournalFromInvoice, reverseEntriesForInvoice } from "./journals";
 import { getParty } from "./parties";
 import { nextNumber, type NumberingScope } from "./numbering";
 import { computeVat } from "./vat";
@@ -101,10 +104,37 @@ export async function createDraft(input: CreateDraftInput): Promise<Invoice> {
   return created;
 }
 
-export async function deleteInvoice(id: number): Promise<void> {
-  await deleteEntriesForInvoice(id);
+/**
+ * Refuse to change a document that has already been posted.
+ *
+ * The UI hides these controls on a non-draft invoice, but the API is a public
+ * surface that the org's agent calls directly, so the rule has to live here
+ * too. Without it an issued invoice could be silently rewritten while its
+ * journal entry stood unchanged, and the books would drift from the documents
+ * behind them.
+ */
+function assertEditable(inv: Invoice): void {
+  if (inv.status !== "draft") {
+    throw new LedgerError(
+      `Invoice ${inv.number ?? inv.id} is ${inv.status} and can no longer be edited. ` +
+        `Cancel it or raise a credit note -- a posted document stays as it was issued.`,
+    );
+  }
+}
+
+export async function deleteInvoice(id: number, actor: Actor): Promise<void> {
+  const inv = await getInvoice(id);
+  if (!inv) return;
+  if (inv.status !== "draft") {
+    throw new LedgerError(
+      `Invoice ${inv.number ?? id} is ${inv.status} and cannot be deleted. ` +
+        `Cancel it instead -- that reverses its journal entry and leaves both on the record.`,
+    );
+  }
+  // A draft was never posted, so there is nothing in the ledger to reverse.
   await run("DELETE FROM invoice_lines WHERE invoice_id = ?", [id]);
   await run("DELETE FROM invoices WHERE id = ?", [id]);
+  await record(actor, "invoice.delete", "invoice", id, inv, null);
 }
 
 const SCOPE_FOR_TYPE: Record<InvoiceType, NumberingScope> = {
@@ -113,12 +143,16 @@ const SCOPE_FOR_TYPE: Record<InvoiceType, NumberingScope> = {
   quote: "quote",
 };
 
-export async function issueInvoice(id: number): Promise<Invoice | undefined> {
+export async function issueInvoice(id: number, actor: Actor): Promise<Invoice | undefined> {
   const inv = await getInvoice(id);
   if (!inv) return undefined;
   if (inv.status !== "draft") return inv;
-  const number = await nextNumber(SCOPE_FOR_TYPE[inv.type]);
   const today = new Date().toISOString().slice(0, 10);
+  // Check the period before anything is written. Issuing assigns a number from
+  // a gap-free sequence and posts to the ledger; if the posting were refused
+  // afterwards the invoice would be left issued, numbered and unposted.
+  await assertPeriodOpen(inv.issue_date ?? today, `Invoice ${id}`);
+  const number = await nextNumber(SCOPE_FOR_TYPE[inv.type]);
   await run(
     `UPDATE invoices
        SET number = ?,
@@ -128,25 +162,36 @@ export async function issueInvoice(id: number): Promise<Invoice | undefined> {
      WHERE id = ?`,
     [number, today, id],
   );
-  await createJournalFromInvoice(id);
-  return getInvoice(id);
+  await createJournalFromInvoice(id, actor);
+  const issued = await getInvoice(id);
+  await record(actor, "invoice.issue", "invoice", id, { status: inv.status }, issued);
+  return issued;
 }
 
-export async function setStatus(id: number, status: InvoiceStatus): Promise<Invoice | undefined> {
+export async function setStatus(id: number, status: InvoiceStatus, actor: Actor): Promise<Invoice | undefined> {
+  const before = await getInvoice(id);
+  if (!before) return undefined;
+  // Reverse first: it is the step that can be refused (a locked period), and
+  // doing it before the status write means a refusal leaves nothing changed.
+  if (status === "cancelled") {
+    await reverseEntriesForInvoice(id, actor);
+  }
   await run(
     `UPDATE invoices SET status = ?, updated_at = datetime('now') WHERE id = ?`,
     [status, id],
   );
-  if (status === "cancelled") {
-    await deleteEntriesForInvoice(id);
-  }
-  return getInvoice(id);
+  const after = await getInvoice(id);
+  await record(actor, "invoice.status", "invoice", id, { status: before.status }, { status });
+  return after;
 }
 
 export async function updateInvoice(
   id: number,
   input: Partial<Pick<Invoice, "party_id" | "currency" | "issue_date" | "due_date" | "reference" | "notes">>,
 ): Promise<Invoice | undefined> {
+  const inv = await getInvoice(id);
+  if (!inv) return undefined;
+  assertEditable(inv);
   const sets: string[] = [];
   const params: unknown[] = [];
   for (const col of ["party_id", "currency", "issue_date", "due_date", "reference", "notes"] as const) {
@@ -178,6 +223,7 @@ export interface LineInput {
 export async function addLine(invoiceId: number, input: LineInput): Promise<InvoiceLine | undefined> {
   const inv = await getInvoice(invoiceId);
   if (!inv) return undefined;
+  assertEditable(inv);
   const maxRow = await get<{ max_pos: number | null }>(
     "SELECT MAX(position) AS max_pos FROM invoice_lines WHERE invoice_id = ?",
     [invoiceId],
@@ -209,6 +255,9 @@ export async function updateLine(lineId: number, input: LineInput): Promise<Invo
     [lineId],
   );
   if (!owner) return undefined;
+  const parent = await getInvoice(owner.invoice_id);
+  if (!parent) return undefined;
+  assertEditable(parent);
   const sets: string[] = [];
   const params: unknown[] = [];
   for (const col of ["product_id", "description", "quantity", "unit", "unit_price_cents", "vat_rate", "account_code", "position"] as const) {
@@ -232,6 +281,9 @@ export async function deleteLine(lineId: number): Promise<void> {
     [lineId],
   );
   if (!owner) return;
+  const parent = await getInvoice(owner.invoice_id);
+  if (!parent) return;
+  assertEditable(parent);
   await run("DELETE FROM invoice_lines WHERE id = ?", [lineId]);
   await recomputeTotals(owner.invoice_id);
 }

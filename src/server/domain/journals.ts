@@ -1,4 +1,6 @@
 import { get, query, run } from "../db";
+import { record, SYSTEM_ACTOR, type Actor } from "./audit";
+import { assertPeriodOpen, isPeriodLocked } from "./periods";
 import { getInvoice, getLines } from "./invoices";
 
 export interface JournalEntry {
@@ -9,6 +11,8 @@ export interface JournalEntry {
   source_type: string | null;
   source_id: number | null;
   status: string;
+  reverses_entry_id: number | null;
+  reversed_by_entry_id: number | null;
   posted_at: string;
   created_at: string;
 }
@@ -80,11 +84,90 @@ export async function getEntry(id: number): Promise<JournalEntryWithLines | unde
   };
 }
 
-export async function deleteEntriesForInvoice(invoiceId: number): Promise<void> {
-  await run(
-    "DELETE FROM journal_entries WHERE source_type IN ('invoice','credit_note') AND source_id = ?",
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Reverse one posted entry with a mirror-image Storno.
+ *
+ * Both entries stay `posted` and net to zero, so the trial balance is right
+ * without either one leaving the books. The Storno is dated in the original's
+ * period when that period is still open, and today when it is not -- a closed
+ * month keeps the numbers it was reported with, and the correction lands where
+ * it can still be seen.
+ */
+async function reverseEntry(entry: JournalEntry, actor: Actor): Promise<number> {
+  const stornoDate = (await isPeriodLocked(entry.date)) ? today() : entry.date;
+  await assertPeriodOpen(stornoDate, `The reversal of ${entry.reference}`);
+
+  const lines = await query<JournalLine>(
+    "SELECT * FROM journal_lines WHERE entry_id = ? ORDER BY position",
+    [entry.id],
+  );
+
+  // There is no transaction primitive here, so the writes are ordered to fail
+  // safe: the Storno is only counted once its lines exist. A crash part-way
+  // leaves a 'pending' entry, which no report reads, rather than half a
+  // reversal that silently unbalances the books.
+  const result = await run(
+    `INSERT INTO journal_entries (reference, description, date, source_type, source_id, status, reverses_entry_id)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+    [
+      entry.reference,
+      `Reversal of ${entry.description ?? entry.reference}`,
+      stornoDate,
+      entry.source_type,
+      entry.source_id,
+      entry.id,
+    ],
+  );
+  const stornoId = result.lastInsertRowid;
+
+  for (const line of lines) {
+    await run(
+      `INSERT INTO journal_lines (entry_id, position, account_code, description, debit_cents, credit_cents)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        stornoId,
+        line.position,
+        line.account_code,
+        `Reversal ${line.description ?? ""}`.trim(),
+        line.credit_cents,
+        line.debit_cents,
+      ],
+    );
+  }
+
+  await run("UPDATE journal_entries SET reversed_by_entry_id = ? WHERE id = ?", [stornoId, entry.id]);
+  await run("UPDATE journal_entries SET status = 'posted' WHERE id = ?", [stornoId]);
+
+  await record(actor, "journal.reverse", "journal_entry", entry.id, entry, {
+    reversed_by_entry_id: stornoId,
+    date: stornoDate,
+  });
+  return stornoId;
+}
+
+/**
+ * Reverse every posted entry behind an invoice.
+ *
+ * Replaces the delete this used to be: a posted entry is never removed, so
+ * cancelling a document leaves the original and its Storno both on the record.
+ */
+export async function reverseEntriesForInvoice(invoiceId: number, actor: Actor): Promise<number> {
+  const entries = await query<JournalEntry>(
+    `SELECT * FROM journal_entries
+      WHERE source_type IN ('invoice','credit_note')
+        AND source_id = ?
+        AND status = 'posted'
+        AND reversed_by_entry_id IS NULL`,
     [invoiceId],
   );
+  for (const entry of entries) {
+    await reverseEntry(entry, actor);
+  }
+  return entries.length;
 }
 
 interface PendingLine {
@@ -94,13 +177,15 @@ interface PendingLine {
   credit_cents: number;
 }
 
-export async function createFromInvoice(invoiceId: number): Promise<JournalEntry | undefined> {
+export async function createFromInvoice(invoiceId: number, actor: Actor = SYSTEM_ACTOR): Promise<JournalEntry | undefined> {
   const inv = await getInvoice(invoiceId);
   if (!inv) return undefined;
   if (!inv.number) return undefined;
   if (inv.status === "draft" || inv.status === "cancelled") return undefined;
 
-  await deleteEntriesForInvoice(invoiceId);
+  // Re-posting reverses what was there before rather than deleting it, so the
+  // superseded entry stays visible next to its replacement.
+  await reverseEntriesForInvoice(invoiceId, actor);
 
   const lines = await getLines(invoiceId);
   if (lines.length === 0) return undefined;
@@ -172,7 +257,8 @@ export async function createFromInvoice(invoiceId: number): Promise<JournalEntry
     throw new Error(`Journal entry would not balance: debit ${totalDebit} ≠ credit ${totalCredit}`);
   }
 
-  const date = inv.issue_date ?? new Date().toISOString().slice(0, 10);
+  const date = inv.issue_date ?? today();
+  await assertPeriodOpen(date, `${isCreditNote ? "Credit note" : "Invoice"} ${inv.number}`);
   const description = isCreditNote
     ? `Credit note ${inv.number}`
     : `Invoice ${inv.number}`;
@@ -193,10 +279,12 @@ export async function createFromInvoice(invoiceId: number): Promise<JournalEntry
     );
   }
 
-  return get<JournalEntry>("SELECT * FROM journal_entries WHERE id = ?", [entryId]);
+  const entry = await get<JournalEntry>("SELECT * FROM journal_entries WHERE id = ?", [entryId]);
+  await record(actor, "journal.post", "journal_entry", entryId, null, entry);
+  return entry;
 }
 
-export async function backfillFromInvoices(): Promise<{ created: number }> {
+export async function backfillFromInvoices(actor: Actor = SYSTEM_ACTOR): Promise<{ created: number }> {
   const candidates = await query<{ id: number }>(
     `SELECT i.id FROM invoices i
       LEFT JOIN journal_entries j
@@ -207,7 +295,7 @@ export async function backfillFromInvoices(): Promise<{ created: number }> {
   );
   let created = 0;
   for (const row of candidates) {
-    const entry = await createFromInvoice(row.id);
+    const entry = await createFromInvoice(row.id, actor);
     if (entry) created++;
   }
   return { created };

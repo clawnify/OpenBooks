@@ -136,6 +136,12 @@ CREATE TABLE IF NOT EXISTS company (
 -- The singleton company row is created by the app (ensureCompanyRow in
 -- src/server/domain/company.ts): a deploy applies this file as DDL only.
 
+-- A posted entry is never deleted or edited. A correction is a second,
+-- mirror-image entry (a Storno): both stay `posted` and net to zero, so the
+-- trial balance stays right while the history stays complete. The pair is
+-- linked by reverses_entry_id / reversed_by_entry_id -- there is deliberately
+-- no 'reversed' status, because dropping the original out of the
+-- `status = 'posted'` reports would subtract the same amount twice.
 CREATE TABLE IF NOT EXISTS journal_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   reference TEXT NOT NULL,
@@ -143,9 +149,16 @@ CREATE TABLE IF NOT EXISTS journal_entries (
   date TEXT NOT NULL,
   source_type TEXT,
   source_id INTEGER,
+  -- 'posted' counts towards the books. 'pending' is the brief window while a
+  -- Storno is being written; there is no transaction primitive, so the entry
+  -- is flipped to 'posted' only once its lines are in.
   status TEXT NOT NULL DEFAULT 'posted',
+  reverses_entry_id INTEGER,
+  reversed_by_entry_id INTEGER,
   posted_at TEXT NOT NULL DEFAULT (datetime('now')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (reverses_entry_id) REFERENCES journal_entries(id),
+  FOREIGN KEY (reversed_by_entry_id) REFERENCES journal_entries(id)
 );
 
 CREATE TABLE IF NOT EXISTS journal_lines (
@@ -164,3 +177,37 @@ CREATE INDEX IF NOT EXISTS idx_journal_entries_date ON journal_entries(date);
 CREATE INDEX IF NOT EXISTS idx_journal_entries_source ON journal_entries(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_journal_lines_entry ON journal_lines(entry_id);
 CREATE INDEX IF NOT EXISTS idx_journal_lines_account ON journal_lines(account_code);
+
+CREATE INDEX IF NOT EXISTS idx_journal_entries_reverses ON journal_entries(reverses_entry_id);
+CREATE INDEX IF NOT EXISTS idx_journal_entries_reversed_by ON journal_entries(reversed_by_entry_id);
+
+-- A locked period is closed for good: nothing may be posted into it again.
+-- Locking is one-way on purpose -- an "unlock" would make every lock a
+-- suggestion, and the point of the lock is that it is not one.
+CREATE TABLE IF NOT EXISTS periods (
+  year INTEGER NOT NULL,
+  month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+  locked_at TEXT NOT NULL DEFAULT (datetime('now')),
+  locked_by TEXT,
+  locked_by_kind TEXT,
+  PRIMARY KEY (year, month)
+);
+
+-- Append-only record of everything that touched the books, and who did it.
+-- actor_kind comes straight from the platform's caller() -- 'user' and 'api'
+-- are a person, 'agent' and 'agent-browser' are the org's agent acting on its
+-- own, which is exactly the distinction an auditor asks about.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL DEFAULT (datetime('now')),
+  actor TEXT,
+  actor_kind TEXT NOT NULL DEFAULT 'public',
+  action TEXT NOT NULL,
+  entity TEXT NOT NULL,
+  entity_id INTEGER,
+  before_json TEXT,
+  after_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at);
+CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity, entity_id);
