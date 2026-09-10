@@ -10,16 +10,16 @@ importers:
     dependencies:
       '@clawnify/app':
         specifier: ^0.1.0
-        version: 0.1.0(@cloudflare/workers-types@4.20260503.1)(@hono/zod-openapi@0.18.4(hono@4.12.16)(zod@3.25.76))(hono@4.12.16)
+        version: 0.1.0(@cloudflare/workers-types@4.20260503.1)(@hono/zod-openapi@0.18.4(hono@4.13.7)(zod@3.25.76))(hono@4.13.7)
       '@clawnify/db':
         specifier: ^0.4.1
         version: 0.4.1(@cloudflare/workers-types@4.20260503.1)
       '@hono/zod-openapi':
         specifier: ^0.18.0
-        version: 0.18.4(hono@4.12.16)(zod@3.25.76)
+        version: 0.18.4(hono@4.13.7)(zod@3.25.76)
       hono:
-        specifier: ^4.6.0
-        version: 4.12.16
+        specifier: ^4.13.7
+        version: 4.13.7
       react:
         specifier: ^19.0.0
         version: 19.2.5
@@ -1354,8 +1354,8 @@ packages:
     resolution: {integrity: sha512-ej4AhfhfL2Q2zpMmLo7U1Uv9+PyhIZpgQLGT1F9miIGmiCJIoCgSmczFdrc97mWT4kVY72KA+WnnhJ5pghSvSg==}
     engines: {node: '>= 0.4'}
 
-  hono@4.12.16:
-    resolution: {integrity: sha512-jN0ZewiNAWSe5khM3EyCmBb250+b40wWbwNILNfEvq84VREWwOIkuUsFONk/3i3nqkz7Oe1PcpM2mwQEK2L9Kg==}
+  hono@4.13.7:
+    resolution: {integrity: sha512-c8/gF9ac8Y78/agExVocyLevgR+JlpNB444Py0FSX8pJoPdYUfUzRcXtYEYGwt6l19qIlVZPN5Mfsw9jFShmQQ==}
     engines: {node: '>=16.9.0'}
 
   http-errors@2.0.1:
@@ -1976,12 +1976,12 @@ snapshots:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
 
-  '@clawnify/app@0.1.0(@cloudflare/workers-types@4.20260503.1)(@hono/zod-openapi@0.18.4(hono@4.12.16)(zod@3.25.76))(hono@4.12.16)':
+  '@clawnify/app@0.1.0(@cloudflare/workers-types@4.20260503.1)(@hono/zod-openapi@0.18.4(hono@4.13.7)(zod@3.25.76))(hono@4.13.7)':
     dependencies:
       '@clawnify/db': 0.4.1(@cloudflare/workers-types@4.20260503.1)
-      '@clawnify/routes': 0.2.1(@hono/zod-openapi@0.18.4(hono@4.12.16)(zod@3.25.76))(hono@4.12.16)
-      '@hono/zod-openapi': 0.18.4(hono@4.12.16)(zod@3.25.76)
-      hono: 4.12.16
+      '@clawnify/routes': 0.2.1(@hono/zod-openapi@0.18.4(hono@4.13.7)(zod@3.25.76))(hono@4.13.7)
+      '@hono/zod-openapi': 0.18.4(hono@4.13.7)(zod@3.25.76)
+      hono: 4.13.7
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -2047,10 +2047,10 @@ snapshots:
       - sql.js
       - sqlite3
 
-  '@clawnify/routes@0.2.1(@hono/zod-openapi@0.18.4(hono@4.12.16)(zod@3.25.76))(hono@4.12.16)':
+  '@clawnify/routes@0.2.1(@hono/zod-openapi@0.18.4(hono@4.13.7)(zod@3.25.76))(hono@4.13.7)':
     dependencies:
-      '@hono/zod-openapi': 0.18.4(hono@4.12.16)(zod@3.25.76)
-      hono: 4.12.16
+      '@hono/zod-openapi': 0.18.4(hono@4.13.7)(zod@3.25.76)
+      hono: 4.13.7
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
 
@@ -2242,20 +2242,20 @@ snapshots:
   '@esbuild/win32-x64@0.27.3':
     optional: true
 
-  '@hono/node-server@1.19.14(hono@4.12.16)':
+  '@hono/node-server@1.19.14(hono@4.13.7)':
     dependencies:
-      hono: 4.12.16
+      hono: 4.13.7
 
-  '@hono/zod-openapi@0.18.4(hono@4.12.16)(zod@3.25.76)':
+  '@hono/zod-openapi@0.18.4(hono@4.13.7)(zod@3.25.76)':
     dependencies:
       '@asteasolutions/zod-to-openapi': 7.3.4(zod@3.25.76)
-      '@hono/zod-validator': 0.4.3(hono@4.12.16)(zod@3.25.76)
-      hono: 4.12.16
+      '@hono/zod-validator': 0.4.3(hono@4.13.7)(zod@3.25.76)
+      hono: 4.13.7
       zod: 3.25.76
 
-  '@hono/zod-validator@0.4.3(hono@4.12.16)(zod@3.25.76)':
+  '@hono/zod-validator@0.4.3(hono@4.13.7)(zod@3.25.76)':
     dependencies:
-      hono: 4.12.16
+      hono: 4.13.7
       zod: 3.25.76
 
   '@img/colour@1.1.0': {}
@@ -2380,7 +2380,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.29.0(zod@3.25.76)':
     dependencies:
-      '@hono/node-server': 1.19.14(hono@4.12.16)
+      '@hono/node-server': 1.19.14(hono@4.13.7)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -2390,7 +2390,7 @@ snapshots:
       eventsource-parser: 3.0.8
       express: 5.2.1
       express-rate-limit: 8.4.1(express@5.2.1)
-      hono: 4.12.16
+      hono: 4.13.7
       jose: 6.2.3
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -2915,7 +2915,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.12.16: {}
+  hono@4.13.7: {}
 
   http-errors@2.0.1:
     dependencies:

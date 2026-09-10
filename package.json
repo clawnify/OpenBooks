@@ -11,7 +11,7 @@
     "@clawnify/app": "^0.1.0",
     "@clawnify/db": "^0.4.1",
     "@hono/zod-openapi": "^0.18.0",
-    "hono": "^4.6.0",
+    "hono": "^4.13.7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
