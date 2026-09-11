@@ -50,6 +50,17 @@ export async function lockPeriod(year: number, month: number, actor: Actor): Pro
   if (!Number.isInteger(month) || month < 1 || month > 12) {
     throw new LedgerError(`'${month}' is not a month between 1 and 12.`);
   }
+  // A lock is one-way and there is no unlock route, so locking a month that
+  // hasn't ended yet would permanently refuse every invoice for the rest of
+  // it with no way back.
+  const now = new Date();
+  const currentYear = now.getUTCFullYear();
+  const currentMonth = now.getUTCMonth() + 1;
+  if (year > currentYear || (year === currentYear && month >= currentMonth)) {
+    throw new LedgerError(
+      `${year}-${String(month).padStart(2, "0")} has not ended yet. A period can only be locked once its month is over.`,
+    );
+  }
   const existing = await get<Period>(
     "SELECT * FROM periods WHERE year = ? AND month = ?",
     [year, month],

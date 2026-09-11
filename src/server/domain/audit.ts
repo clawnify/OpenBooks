@@ -73,7 +73,10 @@ export async function listAudit(filters: { entity?: string; entity_id?: number; 
   const params: unknown[] = [];
   if (filters.entity) { where.push("entity = ?"); params.push(filters.entity); }
   if (filters.entity_id) { where.push("entity_id = ?"); params.push(filters.entity_id); }
-  const limit = Math.min(Math.max(filters.limit ?? 200, 1), 1000);
+  // ?? only falls back on null/undefined, so an unparsable `limit` (Number("abc")
+  // is NaN, not undefined) would otherwise reach the query below as `LIMIT NaN`.
+  const requested = Number.isFinite(filters.limit) ? (filters.limit as number) : 200;
+  const limit = Math.min(Math.max(requested, 1), 1000);
   return query<AuditRow>(
     `SELECT * FROM audit_log ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC LIMIT ${limit}`,
     params,

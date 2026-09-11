@@ -98,6 +98,20 @@ function today(): string {
  * it can still be seen.
  */
 async function reverseEntry(entry: JournalEntry, actor: Actor): Promise<number> {
+  // Idempotent: a prior call may have posted the Storno and then crashed
+  // before linking it back (see the write order below). Reuse it rather
+  // than posting a second reversal for the same entry.
+  const existingStorno = await get<JournalEntry>(
+    "SELECT * FROM journal_entries WHERE reverses_entry_id = ? AND status = 'posted'",
+    [entry.id],
+  );
+  if (existingStorno) {
+    if (!entry.reversed_by_entry_id) {
+      await run("UPDATE journal_entries SET reversed_by_entry_id = ? WHERE id = ?", [existingStorno.id, entry.id]);
+    }
+    return existingStorno.id;
+  }
+
   const stornoDate = (await isPeriodLocked(entry.date)) ? today() : entry.date;
   await assertPeriodOpen(stornoDate, `The reversal of ${entry.reference}`);
 
@@ -139,8 +153,13 @@ async function reverseEntry(entry: JournalEntry, actor: Actor): Promise<number> 
     );
   }
 
-  await run("UPDATE journal_entries SET reversed_by_entry_id = ? WHERE id = ?", [stornoId, entry.id]);
+  // Post the Storno before linking it back. A crash between these two writes
+  // then leaves the books already correct (every report already counts the
+  // posted Storno) with only the back-link missing -- and the idempotency
+  // check above finishes that link on retry instead of posting a second,
+  // duplicate reversal.
   await run("UPDATE journal_entries SET status = 'posted' WHERE id = ?", [stornoId]);
+  await run("UPDATE journal_entries SET reversed_by_entry_id = ? WHERE id = ?", [stornoId, entry.id]);
 
   await record(actor, "journal.reverse", "journal_entry", entry.id, entry, {
     reversed_by_entry_id: stornoId,
@@ -182,10 +201,6 @@ export async function createFromInvoice(invoiceId: number, actor: Actor = SYSTEM
   if (!inv) return undefined;
   if (!inv.number) return undefined;
   if (inv.status === "draft" || inv.status === "cancelled") return undefined;
-
-  // Re-posting reverses what was there before rather than deleting it, so the
-  // superseded entry stays visible next to its replacement.
-  await reverseEntriesForInvoice(invoiceId, actor);
 
   const lines = await getLines(invoiceId);
   if (lines.length === 0) return undefined;
@@ -259,6 +274,13 @@ export async function createFromInvoice(invoiceId: number, actor: Actor = SYSTEM
 
   const date = inv.issue_date ?? today();
   await assertPeriodOpen(date, `${isCreditNote ? "Credit note" : "Invoice"} ${inv.number}`);
+
+  // Re-posting reverses what was there before rather than deleting it, so the
+  // superseded entry stays visible next to its replacement. Done last, after
+  // every check that can still refuse this call -- a refusal here would
+  // otherwise leave the old entry reversed with nothing posted to replace it.
+  await reverseEntriesForInvoice(invoiceId, actor);
+
   const description = isCreditNote
     ? `Credit note ${inv.number}`
     : `Invoice ${inv.number}`;

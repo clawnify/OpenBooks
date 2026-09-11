@@ -168,9 +168,22 @@ export async function issueInvoice(id: number, actor: Actor): Promise<Invoice | 
   return issued;
 }
 
+const SETTABLE_STATUSES = new Set<InvoiceStatus>(["sent", "paid", "cancelled"]);
+
 export async function setStatus(id: number, status: InvoiceStatus, actor: Actor): Promise<Invoice | undefined> {
   const before = await getInvoice(id);
   if (!before) return undefined;
+  // This is a public API surface, not just the three buttons the UI shows.
+  // Without these checks an agent (or a stray request) could set an issued
+  // invoice back to 'draft', which reopens editing on a document whose
+  // journal entry has already been posted -- the exact drift assertEditable
+  // exists to prevent.
+  if (before.status === "draft") {
+    throw new LedgerError(`Invoice ${before.number ?? id} is still a draft -- issue it first.`);
+  }
+  if (!SETTABLE_STATUSES.has(status)) {
+    throw new LedgerError(`Cannot set an invoice to '${status}'. Valid transitions are sent, paid, or cancelled.`);
+  }
   // Reverse first: it is the step that can be refused (a locked period), and
   // doing it before the status write means a refusal leaves nothing changed.
   if (status === "cancelled") {
