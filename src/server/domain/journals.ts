@@ -1,5 +1,6 @@
-import { get, query, run } from "../db";
-import { getInvoice, getLines } from "./invoices";
+import { get, query } from "../db";
+import { SYSTEM_ACTOR, type Actor } from "./audit";
+import { rethrowLedgerError } from "./errors";
 
 export interface JournalEntry {
   id: number;
@@ -9,6 +10,8 @@ export interface JournalEntry {
   source_type: string | null;
   source_id: number | null;
   status: string;
+  reverses_entry_id: number | null;
+  reversed_by_entry_id: number | null;
   posted_at: string;
   created_at: string;
 }
@@ -28,10 +31,6 @@ export interface JournalEntryWithLines extends JournalEntry {
   total_debit_cents: number;
   total_credit_cents: number;
 }
-
-const RECEIVABLE_ACCOUNT = "BVor";
-const REVENUE_ACCOUNT_FALLBACK = "WOmz";
-const VAT_PAYABLE_ACCOUNT = "BKas";
 
 export async function listEntries(filters: { source_type?: string; from?: string; to?: string } = {}): Promise<JournalEntryWithLines[]> {
   const where: string[] = [];
@@ -80,135 +79,39 @@ export async function getEntry(id: number): Promise<JournalEntryWithLines | unde
   };
 }
 
-export async function deleteEntriesForInvoice(invoiceId: number): Promise<void> {
-  await run(
-    "DELETE FROM journal_entries WHERE source_type IN ('invoice','credit_note') AND source_id = ?",
-    [invoiceId],
-  );
-}
-
-interface PendingLine {
-  account_code: string;
-  description: string;
-  debit_cents: number;
-  credit_cents: number;
-}
-
-export async function createFromInvoice(invoiceId: number): Promise<JournalEntry | undefined> {
-  const inv = await getInvoice(invoiceId);
-  if (!inv) return undefined;
-  if (!inv.number) return undefined;
-  if (inv.status === "draft" || inv.status === "cancelled") return undefined;
-
-  await deleteEntriesForInvoice(invoiceId);
-
-  const lines = await getLines(invoiceId);
-  if (lines.length === 0) return undefined;
-
-  const isCreditNote = inv.type === "credit_note";
-
-  // Group revenue by account_code
-  const revenueByAccount = new Map<string, number>();
-  for (const line of lines) {
-    const acc = line.account_code || REVENUE_ACCOUNT_FALLBACK;
-    revenueByAccount.set(acc, (revenueByAccount.get(acc) ?? 0) + line.subtotal_cents);
-  }
-
-  const totalVat = lines.reduce((s, l) => s + l.vat_cents, 0);
-  const totalGross = inv.total_cents;
-
-  const pending: PendingLine[] = [];
-  if (isCreditNote) {
-    pending.push({
-      account_code: RECEIVABLE_ACCOUNT,
-      description: `Credit ${inv.number}`,
-      debit_cents: 0,
-      credit_cents: totalGross,
-    });
-    for (const [acc, amount] of revenueByAccount) {
-      pending.push({
-        account_code: acc,
-        description: `Revenue reversal ${inv.number}`,
-        debit_cents: amount,
-        credit_cents: 0,
-      });
-    }
-    if (totalVat > 0) {
-      pending.push({
-        account_code: VAT_PAYABLE_ACCOUNT,
-        description: `VAT reversal ${inv.number}`,
-        debit_cents: totalVat,
-        credit_cents: 0,
-      });
-    }
-  } else {
-    pending.push({
-      account_code: RECEIVABLE_ACCOUNT,
-      description: `Invoice ${inv.number}`,
-      debit_cents: totalGross,
-      credit_cents: 0,
-    });
-    for (const [acc, amount] of revenueByAccount) {
-      pending.push({
-        account_code: acc,
-        description: `Revenue ${inv.number}`,
-        debit_cents: 0,
-        credit_cents: amount,
-      });
-    }
-    if (totalVat > 0) {
-      pending.push({
-        account_code: VAT_PAYABLE_ACCOUNT,
-        description: `VAT payable ${inv.number}`,
-        debit_cents: 0,
-        credit_cents: totalVat,
-      });
-    }
-  }
-
-  const totalDebit = pending.reduce((s, l) => s + l.debit_cents, 0);
-  const totalCredit = pending.reduce((s, l) => s + l.credit_cents, 0);
-  if (totalDebit !== totalCredit) {
-    throw new Error(`Journal entry would not balance: debit ${totalDebit} ≠ credit ${totalCredit}`);
-  }
-
-  const date = inv.issue_date ?? new Date().toISOString().slice(0, 10);
-  const description = isCreditNote
-    ? `Credit note ${inv.number}`
-    : `Invoice ${inv.number}`;
-
-  const result = await run(
-    `INSERT INTO journal_entries (reference, description, date, source_type, source_id, status)
-     VALUES (?, ?, ?, ?, ?, 'posted')`,
-    [inv.number, description, date, inv.type, inv.id],
-  );
-  const entryId = result.lastInsertRowid;
-
-  for (let i = 0; i < pending.length; i++) {
-    const p = pending[i];
-    await run(
-      `INSERT INTO journal_lines (entry_id, position, account_code, description, debit_cents, credit_cents)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [entryId, i + 1, p.account_code, p.description, p.debit_cents, p.credit_cents],
+/** Publish a complete original once; historical pending rows do not block retry. */
+export async function createFromInvoice(invoiceId: number, actor: Actor = SYSTEM_ACTOR): Promise<JournalEntry | undefined> {
+  try {
+    // RETURNING works with both D1 and Storage bindings; Storage need not
+    // provide lastInsertRowid metadata. All lines/audit publish in this INSERT.
+    const inserted = await query<{ id: number }>(
+      `INSERT INTO journal_entries
+        (reference, description, date, source_type, source_id, status, mutation_actor, mutation_actor_kind)
+       SELECT number, type || ' ' || number, COALESCE(issue_date, date('now')), type, id, 'pending', ?, ?
+         FROM invoices i WHERE id = ? AND type IN ('invoice','credit_note')
+           AND number IS NOT NULL AND status IN ('issued','sent','paid')
+           AND NOT EXISTS (SELECT 1 FROM journal_entries j WHERE j.source_id = i.id
+             AND j.source_type = i.type AND j.status = 'posted' AND j.reverses_entry_id IS NULL)
+       RETURNING id`,
+      [actor.actor, actor.actor_kind, invoiceId],
     );
+    if (!inserted.length) return undefined;
+    return get<JournalEntry>("SELECT * FROM journal_entries WHERE id = ?", [inserted[0].id]);
+  } catch (error) {
+    rethrowLedgerError(error);
   }
-
-  return get<JournalEntry>("SELECT * FROM journal_entries WHERE id = ?", [entryId]);
 }
 
-export async function backfillFromInvoices(): Promise<{ created: number }> {
+export async function backfillFromInvoices(actor: Actor = SYSTEM_ACTOR): Promise<{ created: number }> {
   const candidates = await query<{ id: number }>(
-    `SELECT i.id FROM invoices i
-      LEFT JOIN journal_entries j
-        ON j.source_id = i.id AND j.source_type IN ('invoice','credit_note')
-     WHERE i.number IS NOT NULL
-       AND i.status IN ('issued','sent','paid')
-       AND j.id IS NULL`,
+    `SELECT i.id FROM invoices i WHERE i.number IS NOT NULL
+       AND i.type IN ('invoice','credit_note') AND i.status IN ('issued','sent','paid')
+       AND NOT EXISTS (SELECT 1 FROM journal_entries j WHERE j.source_id = i.id
+         AND j.source_type = i.type AND j.status = 'posted' AND j.reverses_entry_id IS NULL)`,
   );
   let created = 0;
   for (const row of candidates) {
-    const entry = await createFromInvoice(row.id);
-    if (entry) created++;
+    if (await createFromInvoice(row.id, actor)) created++;
   }
   return { created };
 }

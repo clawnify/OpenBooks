@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { refused } from "../refusal";
 import { Link, navigate } from "../router";
 
 type InvoiceStatus = "draft" | "issued" | "sent" | "paid" | "cancelled";
@@ -160,7 +161,8 @@ export function InvoiceEditorPage({ id }: { id: number }) {
   }
 
   async function removeLine(lineId: number) {
-    await fetch(`/api/lines/${lineId}`, { method: "DELETE" });
+    const res = await fetch(`/api/lines/${lineId}`, { method: "DELETE" });
+    if (await refused(res)) return;
     reload();
   }
 
@@ -169,22 +171,25 @@ export function InvoiceEditorPage({ id }: { id: number }) {
       alert("Add at least one line before issuing.");
       return;
     }
-    await fetch(`/api/invoices/${id}/issue`, { method: "POST" });
+    const res = await fetch(`/api/invoices/${id}/issue`, { method: "POST" });
+    if (await refused(res)) return;
     reload();
   }
 
   async function setStatus(status: InvoiceStatus) {
-    await fetch(`/api/invoices/${id}/status`, {
+    const res = await fetch(`/api/invoices/${id}/status`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
     });
+    if (await refused(res)) return;
     reload();
   }
 
   async function remove() {
-    if (!confirm("Delete this invoice?")) return;
-    await fetch(`/api/invoices/${id}`, { method: "DELETE" });
+    if (!confirm("Delete this draft?")) return;
+    const res = await fetch(`/api/invoices/${id}`, { method: "DELETE" });
+    if (await refused(res)) return;
     navigate("/invoices");
   }
 
@@ -374,7 +379,9 @@ export function InvoiceEditorPage({ id }: { id: number }) {
         {invoice.status !== "cancelled" && invoice.status !== "paid" && invoice.status !== "draft" && (
           <button onClick={() => setStatus("cancelled")} className="px-3 py-1.5 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
         )}
-        <button onClick={remove} className="ml-auto px-3 py-1.5 rounded-lg border border-red-200 text-sm text-red-600 hover:bg-red-50">Delete</button>
+        {invoice.status === "draft" && (
+          <button onClick={remove} className="ml-auto px-3 py-1.5 rounded-lg border border-red-200 text-sm text-red-600 hover:bg-red-50">Delete</button>
+        )}
       </section>
     </div>
   );

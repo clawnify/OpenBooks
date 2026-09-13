@@ -3,12 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "tsx --test tests/*.test.ts",
     "dev": "clawnify dev",
     "build": "vite build",
     "deploy": "clawnify deploy"
   },
   "dependencies": {
-    "@clawnify/app": "^0.1.0",
+    "@clawnify/app": "^0.2.1",
     "@clawnify/db": "^0.4.1",
     "@hono/zod-openapi": "^0.18.0",
     "hono": "^4.13.7",
@@ -23,6 +24,7 @@
     "@vitejs/plugin-react": "^4.0.0",
     "clawnify": "^0.1.13",
     "tailwindcss": "^4.0.0",
+    "tsx": "^4.23.13",
     "vite": "^6.0.0",
     "wrangler": "^4.0.0"
   },

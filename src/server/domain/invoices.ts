@@ -1,8 +1,8 @@
 import { get, query, run } from "../db";
+import type { Actor } from "./audit";
 import { getCompany } from "./company";
-import { createFromInvoice as createJournalFromInvoice, deleteEntriesForInvoice } from "./journals";
+import { LedgerError, rethrowLedgerError } from "./errors";
 import { getParty } from "./parties";
-import { nextNumber, type NumberingScope } from "./numbering";
 import { computeVat } from "./vat";
 
 export type InvoiceType = "invoice" | "credit_note" | "quote";
@@ -101,52 +101,113 @@ export async function createDraft(input: CreateDraftInput): Promise<Invoice> {
   return created;
 }
 
-export async function deleteInvoice(id: number): Promise<void> {
-  await deleteEntriesForInvoice(id);
-  await run("DELETE FROM invoice_lines WHERE invoice_id = ?", [id]);
-  await run("DELETE FROM invoices WHERE id = ?", [id]);
+/**
+ * Refuse to change a document that has already been posted.
+ *
+ * The UI hides these controls on a non-draft invoice, but the API is a public
+ * surface that the org's agent calls directly, so the rule has to live here
+ * too. Without it an issued invoice could be silently rewritten while its
+ * journal entry stood unchanged, and the books would drift from the documents
+ * behind them.
+ */
+function assertEditable(inv: Invoice): void {
+  if (inv.status !== "draft") {
+    throw new LedgerError(
+      `Invoice ${inv.number ?? inv.id} is ${inv.status} and can no longer be edited. ` +
+        `Cancel it or raise a credit note -- a posted document stays as it was issued.`,
+    );
+  }
 }
 
-const SCOPE_FOR_TYPE: Record<InvoiceType, NumberingScope> = {
-  invoice: "invoice",
-  credit_note: "credit_note",
-  quote: "quote",
-};
-
-export async function issueInvoice(id: number): Promise<Invoice | undefined> {
+export async function deleteInvoice(id: number, actor: Actor): Promise<void> {
   const inv = await getInvoice(id);
-  if (!inv) return undefined;
-  if (inv.status !== "draft") return inv;
-  const number = await nextNumber(SCOPE_FOR_TYPE[inv.type]);
-  const today = new Date().toISOString().slice(0, 10);
-  await run(
-    `UPDATE invoices
-       SET number = ?,
-           status = 'issued',
-           issue_date = COALESCE(issue_date, ?),
-           updated_at = datetime('now')
-     WHERE id = ?`,
-    [number, today, id],
-  );
-  await createJournalFromInvoice(id);
-  return getInvoice(id);
+  if (!inv) return;
+  if (inv.status !== "draft") {
+    throw new LedgerError(
+      `Invoice ${inv.number ?? id} is ${inv.status} and cannot be deleted. ` +
+        `Cancel it instead -- that reverses its journal entry and leaves both on the record.`,
+    );
+  }
+  try {
+    // The audit INSERT captures the current row and deletes it in one trigger
+    // transaction. A concurrent issue is refused before either effect commits.
+    await run(
+      `INSERT INTO audit_log(actor, actor_kind, action, entity, entity_id, before_json)
+       SELECT ?, ?, 'invoice.delete', 'invoice', id,
+         json_object('id', id, 'number', number, 'type', type, 'status', status,
+           'party_id', party_id, 'issue_date', issue_date, 'due_date', due_date,
+           'currency', currency, 'fx_rate', fx_rate, 'subtotal_cents', subtotal_cents,
+           'vat_cents', vat_cents, 'total_cents', total_cents, 'reverse_charge', reverse_charge,
+           'reference', reference, 'notes', notes, 'created_at', created_at, 'updated_at', updated_at)
+       FROM invoices WHERE id = ?`,
+      [actor.actor, actor.actor_kind, id],
+    );
+  } catch (error) {
+    rethrowLedgerError(error);
+  }
 }
 
-export async function setStatus(id: number, status: InvoiceStatus): Promise<Invoice | undefined> {
-  await run(
-    `UPDATE invoices SET status = ?, updated_at = datetime('now') WHERE id = ?`,
-    [status, id],
-  );
-  if (status === "cancelled") {
-    await deleteEntriesForInvoice(id);
+export async function issueInvoice(id: number, actor: Actor): Promise<Invoice | undefined> {
+  try {
+    // Number assignment, journal publication and both audits belong to this
+    // conditional statement. Retry after a lost response consumes no number.
+    await run(
+      `UPDATE invoices SET status = 'issued', mutation_actor = ?, mutation_actor_kind = ?,
+         issue_date = COALESCE(issue_date, date('now')),
+         updated_at = datetime('now') WHERE id = ? AND status = 'draft'`,
+      [actor.actor, actor.actor_kind, id],
+    );
+  } catch (error) {
+    rethrowLedgerError(error);
   }
   return getInvoice(id);
+}
+
+const SETTABLE_STATUSES = new Set<InvoiceStatus>(["sent", "paid", "cancelled"]);
+
+export async function setStatus(id: number, status: InvoiceStatus, actor: Actor): Promise<Invoice | undefined> {
+  const before = await getInvoice(id);
+  if (!before) return undefined;
+  // This is a public API surface, not just the three buttons the UI shows.
+  // Without these checks an agent (or a stray request) could set an issued
+  // invoice back to 'draft', which reopens editing on a document whose
+  // journal entry has already been posted -- the exact drift assertEditable
+  // exists to prevent.
+  if (before.status === "draft") {
+    throw new LedgerError(`Invoice ${before.number ?? id} is still a draft -- issue it first.`);
+  }
+  if (!SETTABLE_STATUSES.has(status)) {
+    throw new LedgerError(`Cannot set an invoice to '${status}'. Valid transitions are sent, paid, or cancelled.`);
+  }
+  if (before.status === "cancelled" && status !== "cancelled") {
+    throw new LedgerError("A cancelled invoice cannot be sent or paid. Create a new invoice instead.");
+  }
+  try {
+    // SQLite owns reversal, period checks and status audit in this statement.
+    // Its conditional write makes retries/no-op requests produce no audit.
+    await run(
+      `UPDATE invoices SET status = ?, mutation_actor = ?, mutation_actor_kind = ?,
+         updated_at = datetime('now')
+       WHERE id = ? AND status IN ('issued','sent','paid') AND status <> ?`,
+      [status, actor.actor, actor.actor_kind, id, status],
+    );
+  } catch (error) {
+    rethrowLedgerError(error);
+  }
+  const after = await getInvoice(id);
+  if (after?.status === "cancelled" && status !== "cancelled") {
+    throw new LedgerError("A cancelled invoice cannot be sent or paid. Create a new invoice instead.");
+  }
+  return after;
 }
 
 export async function updateInvoice(
   id: number,
   input: Partial<Pick<Invoice, "party_id" | "currency" | "issue_date" | "due_date" | "reference" | "notes">>,
 ): Promise<Invoice | undefined> {
+  const inv = await getInvoice(id);
+  if (!inv) return undefined;
+  assertEditable(inv);
   const sets: string[] = [];
   const params: unknown[] = [];
   for (const col of ["party_id", "currency", "issue_date", "due_date", "reference", "notes"] as const) {
@@ -178,6 +239,7 @@ export interface LineInput {
 export async function addLine(invoiceId: number, input: LineInput): Promise<InvoiceLine | undefined> {
   const inv = await getInvoice(invoiceId);
   if (!inv) return undefined;
+  assertEditable(inv);
   const maxRow = await get<{ max_pos: number | null }>(
     "SELECT MAX(position) AS max_pos FROM invoice_lines WHERE invoice_id = ?",
     [invoiceId],
@@ -209,6 +271,9 @@ export async function updateLine(lineId: number, input: LineInput): Promise<Invo
     [lineId],
   );
   if (!owner) return undefined;
+  const parent = await getInvoice(owner.invoice_id);
+  if (!parent) return undefined;
+  assertEditable(parent);
   const sets: string[] = [];
   const params: unknown[] = [];
   for (const col of ["product_id", "description", "quantity", "unit", "unit_price_cents", "vat_rate", "account_code", "position"] as const) {
@@ -232,6 +297,9 @@ export async function deleteLine(lineId: number): Promise<void> {
     [lineId],
   );
   if (!owner) return;
+  const parent = await getInvoice(owner.invoice_id);
+  if (!parent) return;
+  assertEditable(parent);
   await run("DELETE FROM invoice_lines WHERE id = ?", [lineId]);
   await recomputeTotals(owner.invoice_id);
 }
