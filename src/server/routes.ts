@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { clearAccounts, getAccount, getTree, listAccounts, loadStarter } from "./domain/rgs";
 import { createParty, deleteParty, getParty, listParties, updateParty, type PartyKind } from "./domain/parties";
 import { createProduct, deleteProduct, getProduct, listProducts, updateProduct } from "./domain/products";
@@ -33,13 +34,14 @@ const api = new Hono();
 // A refused write is not a server fault -- it is the books saying no. Turned
 // into a 409 here so every route reports it the same way, with the message the
 // domain wrote (agents call these routes directly and act on that text).
-api.use("*", async (c, next) => {
-  try {
-    await next();
-  } catch (err) {
-    if (err instanceof LedgerError) return c.json({ error: err.message }, 409);
-    throw err;
+api.onError((err, c) => {
+  if (err instanceof LedgerError) return c.json({ error: err.message }, 409);
+  if (err instanceof HTTPException) {
+    const response = err.getResponse();
+    return c.newResponse(response.body, response);
   }
+  console.error(err);
+  return c.text("Internal Server Error", 500);
 });
 
 api.get("/api/accounts", async (c) => {

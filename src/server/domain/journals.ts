@@ -169,7 +169,7 @@ async function reverseEntry(entry: JournalEntry, actor: Actor): Promise<number> 
 }
 
 /**
- * Reverse every posted entry behind an invoice.
+ * Reverse every original posted entry behind an invoice.
  *
  * Replaces the delete this used to be: a posted entry is never removed, so
  * cancelling a document leaves the original and its Storno both on the record.
@@ -180,6 +180,7 @@ export async function reverseEntriesForInvoice(invoiceId: number, actor: Actor):
       WHERE source_type IN ('invoice','credit_note')
         AND source_id = ?
         AND status = 'posted'
+        AND reverses_entry_id IS NULL
         AND reversed_by_entry_id IS NULL`,
     [invoiceId],
   );

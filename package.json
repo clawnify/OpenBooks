@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "tsx --test tests/*.test.ts",
     "dev": "clawnify dev",
     "build": "vite build",
     "deploy": "clawnify deploy"
@@ -23,6 +24,7 @@
     "@vitejs/plugin-react": "^4.0.0",
     "clawnify": "^0.1.13",
     "tailwindcss": "^4.0.0",
+    "tsx": "^4.23.13",
     "vite": "^6.0.0",
     "wrangler": "^4.0.0"
   },
