@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS invoices (
   vat_cents INTEGER NOT NULL DEFAULT 0,
   total_cents INTEGER NOT NULL DEFAULT 0,
   reverse_charge INTEGER NOT NULL DEFAULT 0,
+  mutation_actor TEXT,
+  mutation_actor_kind TEXT,
   reference TEXT,
   notes TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -149,12 +151,12 @@ CREATE TABLE IF NOT EXISTS journal_entries (
   date TEXT NOT NULL,
   source_type TEXT,
   source_id INTEGER,
-  -- 'posted' counts towards the books. 'pending' is the brief window while a
-  -- Storno is being written; there is no transaction primitive, so the entry
-  -- is flipped to 'posted' only once its lines are in.
+  -- Triggers publish pending entries with their lines and audit in one statement.
   status TEXT NOT NULL DEFAULT 'posted',
   reverses_entry_id INTEGER,
   reversed_by_entry_id INTEGER,
+  mutation_actor TEXT,
+  mutation_actor_kind TEXT,
   posted_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (reverses_entry_id) REFERENCES journal_entries(id),
@@ -211,3 +213,191 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at);
 CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity, entity_id);
+
+-- These constraints deliberately refuse a migration over duplicate historical
+-- postings; repairing those books requires an explicit accounting decision.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_posted_reversal_v1
+  ON journal_entries(reverses_entry_id)
+  WHERE status = 'posted' AND reverses_entry_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_active_original_v1
+  ON journal_entries(source_type, source_id)
+  WHERE status = 'posted' AND reverses_entry_id IS NULL
+    AND reversed_by_entry_id IS NULL AND source_type IN ('invoice','credit_note');
+
+-- SQLite runs each initiating statement and its trigger effects atomically,
+-- including through the platform's single-query Storage binding. Date and lock
+-- checks belong here so a concurrent lock cannot pass a stale application check.
+CREATE TRIGGER IF NOT EXISTS ledger_entry_insert_guard_v1
+BEFORE INSERT ON journal_entries
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:invalid-date')
+    WHERE NEW.date IS NULL
+       OR NEW.date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+       OR NEW.date < '1900-01-01' OR date(NEW.date, '+0 days') IS NOT NEW.date;
+  SELECT RAISE(ABORT, 'ledger:period-locked') WHERE EXISTS (
+    SELECT 1 FROM periods
+    WHERE year = CAST(substr(NEW.date, 1, 4) AS INTEGER)
+      AND month = CAST(substr(NEW.date, 6, 2) AS INTEGER)
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_entry_publish_guard_v1
+BEFORE UPDATE OF status ON journal_entries
+WHEN NEW.status = 'posted' AND OLD.status <> 'posted'
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:invalid-date')
+    WHERE NEW.date IS NULL
+       OR NEW.date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+       OR NEW.date < '1900-01-01' OR date(NEW.date, '+0 days') IS NOT NEW.date;
+  SELECT RAISE(ABORT, 'ledger:period-locked') WHERE EXISTS (
+    SELECT 1 FROM periods
+    WHERE year = CAST(substr(NEW.date, 1, 4) AS INTEGER)
+      AND month = CAST(substr(NEW.date, 6, 2) AS INTEGER)
+  );
+  SELECT RAISE(ABORT, 'ledger:unbalanced-entry')
+    WHERE NOT EXISTS (SELECT 1 FROM journal_lines WHERE entry_id = NEW.id)
+       OR (SELECT SUM(debit_cents - credit_cents) FROM journal_lines WHERE entry_id = NEW.id) <> 0;
+  SELECT RAISE(ABORT, 'ledger:invalid-source')
+    WHERE NEW.reverses_entry_id IS NULL AND NEW.source_type IN ('invoice','credit_note')
+      AND NOT EXISTS (SELECT 1 FROM invoices WHERE id = NEW.source_id AND type = NEW.source_type
+        AND number = NEW.reference AND COALESCE(issue_date, date('now')) = NEW.date
+        AND status IN ('issued','sent','paid'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_reverse_insert_v1
+AFTER INSERT ON journal_entries
+WHEN NEW.reverses_entry_id IS NOT NULL AND NEW.status = 'pending'
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:invalid-original') WHERE NOT EXISTS (
+    SELECT 1 FROM journal_entries WHERE id = NEW.reverses_entry_id
+      AND status = 'posted' AND reverses_entry_id IS NULL AND reversed_by_entry_id IS NULL
+      AND source_type = NEW.source_type AND source_id = NEW.source_id
+      AND date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+      AND date >= '1900-01-01' AND date(date, '+0 days') IS date
+  );
+  INSERT INTO journal_lines(entry_id, position, account_code, description, debit_cents, credit_cents)
+    SELECT NEW.id, position, account_code, trim('Reversal ' || COALESCE(description, '')),
+      credit_cents, debit_cents FROM journal_lines WHERE entry_id = NEW.reverses_entry_id;
+  UPDATE journal_entries SET status = 'posted' WHERE id = NEW.id;
+  UPDATE journal_entries SET reversed_by_entry_id = NEW.id WHERE id = NEW.reverses_entry_id;
+  INSERT INTO audit_log(actor, actor_kind, action, entity, entity_id, after_json)
+    VALUES(NEW.mutation_actor, COALESCE(NEW.mutation_actor_kind, 'system'),
+      'journal.reverse', 'journal_entry', NEW.reverses_entry_id,
+      json_object('reversed_by_entry_id', NEW.id, 'date', NEW.date));
+END;
+
+-- Ordinary posting is idempotent. Issuing/backfill insert a pending header only
+-- when no posted original exists; the trigger derives every line from the same
+-- database snapshot and publishes only a complete, balanced entry.
+CREATE TRIGGER IF NOT EXISTS ledger_original_insert_v1
+AFTER INSERT ON journal_entries
+WHEN NEW.reverses_entry_id IS NULL AND NEW.status = 'pending'
+  AND NEW.source_type IN ('invoice','credit_note')
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:invalid-source') WHERE NOT EXISTS (
+    SELECT 1 FROM invoices WHERE id = NEW.source_id AND type = NEW.source_type
+      AND number = NEW.reference AND COALESCE(issue_date, date('now')) = NEW.date
+      AND status IN ('issued','sent','paid')
+  );
+  SELECT RAISE(ABORT, 'ledger:empty-invoice')
+    WHERE NOT EXISTS (SELECT 1 FROM invoice_lines WHERE invoice_id = NEW.source_id);
+  INSERT INTO journal_lines(entry_id, position, account_code, description, debit_cents, credit_cents)
+    SELECT NEW.id, 1, 'BVor', 'Invoice ' || number, total_cents, 0
+      FROM invoices WHERE id = NEW.source_id AND type = 'invoice'
+    UNION ALL SELECT NEW.id, 1, 'BVor', 'Credit ' || number, 0, total_cents
+      FROM invoices WHERE id = NEW.source_id AND type = 'credit_note';
+  INSERT INTO journal_lines(entry_id, position, account_code, description, debit_cents, credit_cents)
+    SELECT NEW.id, 1 + ROW_NUMBER() OVER (ORDER BY COALESCE(NULLIF(account_code, ''), 'WOmz')),
+      COALESCE(NULLIF(account_code, ''), 'WOmz'), 'Revenue ' || NEW.reference, 0, SUM(subtotal_cents)
+      FROM invoice_lines WHERE invoice_id = NEW.source_id AND NEW.source_type = 'invoice'
+      GROUP BY COALESCE(NULLIF(account_code, ''), 'WOmz')
+    UNION ALL
+    SELECT NEW.id, 1 + ROW_NUMBER() OVER (ORDER BY COALESCE(NULLIF(account_code, ''), 'WOmz')),
+      COALESCE(NULLIF(account_code, ''), 'WOmz'), 'Revenue reversal ' || NEW.reference, SUM(subtotal_cents), 0
+      FROM invoice_lines WHERE invoice_id = NEW.source_id AND NEW.source_type = 'credit_note'
+      GROUP BY COALESCE(NULLIF(account_code, ''), 'WOmz');
+  INSERT INTO journal_lines(entry_id, position, account_code, description, debit_cents, credit_cents)
+    SELECT NEW.id, (SELECT COUNT(*) + 1 FROM journal_lines WHERE entry_id = NEW.id),
+      'BKas', 'VAT payable ' || NEW.reference, 0, SUM(vat_cents)
+      FROM invoice_lines WHERE invoice_id = NEW.source_id AND NEW.source_type = 'invoice'
+      HAVING SUM(vat_cents) > 0
+    UNION ALL
+    SELECT NEW.id, (SELECT COUNT(*) + 1 FROM journal_lines WHERE entry_id = NEW.id),
+      'BKas', 'VAT reversal ' || NEW.reference, SUM(vat_cents), 0
+      FROM invoice_lines WHERE invoice_id = NEW.source_id AND NEW.source_type = 'credit_note'
+      HAVING SUM(vat_cents) > 0;
+  UPDATE journal_entries SET status = 'posted' WHERE id = NEW.id;
+  INSERT INTO audit_log(actor, actor_kind, action, entity, entity_id, after_json)
+    VALUES(NEW.mutation_actor, COALESCE(NEW.mutation_actor_kind, 'system'),
+      'journal.post', 'journal_entry', NEW.id,
+      json_object('reference', NEW.reference, 'date', NEW.date, 'source_type', NEW.source_type, 'source_id', NEW.source_id));
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_status_guard_v1
+BEFORE UPDATE OF status ON invoices
+WHEN OLD.status <> NEW.status
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:invalid-transition')
+    WHERE OLD.status = 'cancelled'
+      OR (OLD.status <> 'draft' AND NEW.status NOT IN ('sent','paid','cancelled'))
+      OR (OLD.status = 'draft' AND NEW.status <> 'issued');
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_cancel_v1
+AFTER UPDATE OF status ON invoices
+WHEN NEW.status = 'cancelled' AND OLD.status <> 'cancelled'
+BEGIN
+  -- Repair the legacy crash window without fabricating a historical actor or
+  -- reversal timestamp: this event records who repaired the backlink now.
+  INSERT INTO audit_log(actor, actor_kind, action, entity, entity_id, after_json)
+    SELECT NEW.mutation_actor, COALESCE(NEW.mutation_actor_kind, 'system'),
+      'journal.recovery', 'journal_entry', e.id, json_object('reversed_by_entry_id', r.id)
+      FROM journal_entries e JOIN journal_entries r ON r.reverses_entry_id = e.id AND r.status = 'posted'
+      WHERE e.source_id = NEW.id AND e.source_type IN ('invoice','credit_note')
+        AND e.status = 'posted' AND e.reverses_entry_id IS NULL AND e.reversed_by_entry_id IS NULL;
+  UPDATE journal_entries SET reversed_by_entry_id = (
+    SELECT r.id FROM journal_entries r WHERE r.reverses_entry_id = journal_entries.id AND r.status = 'posted'
+  ) WHERE source_id = NEW.id AND source_type IN ('invoice','credit_note')
+      AND status = 'posted' AND reverses_entry_id IS NULL AND reversed_by_entry_id IS NULL
+      AND EXISTS (SELECT 1 FROM journal_entries r WHERE r.reverses_entry_id = journal_entries.id AND r.status = 'posted');
+  INSERT INTO journal_entries(reference, description, date, source_type, source_id, status,
+      reverses_entry_id, mutation_actor, mutation_actor_kind)
+    SELECT reference, 'Reversal of ' || COALESCE(description, reference),
+      COALESCE((SELECT date('now') FROM periods
+        WHERE year = CAST(substr(e.date, 1, 4) AS INTEGER)
+          AND month = CAST(substr(e.date, 6, 2) AS INTEGER)), e.date),
+      source_type, source_id, 'pending', id, NEW.mutation_actor, NEW.mutation_actor_kind
+      FROM journal_entries e WHERE source_id = NEW.id AND source_type IN ('invoice','credit_note')
+        AND status = 'posted' AND reverses_entry_id IS NULL AND reversed_by_entry_id IS NULL;
+  INSERT INTO audit_log(actor, actor_kind, action, entity, entity_id, before_json, after_json)
+    VALUES(NEW.mutation_actor, COALESCE(NEW.mutation_actor_kind, 'system'), 'invoice.status', 'invoice', NEW.id,
+      json_object('status', OLD.status), json_object('status', NEW.status));
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_status_audit_v1
+AFTER UPDATE OF status ON invoices
+WHEN NEW.status IN ('sent','paid') AND OLD.status <> NEW.status
+BEGIN
+  INSERT INTO audit_log(actor, actor_kind, action, entity, entity_id, before_json, after_json)
+    VALUES(NEW.mutation_actor, COALESCE(NEW.mutation_actor_kind, 'system'), 'invoice.status', 'invoice', NEW.id,
+      json_object('status', OLD.status), json_object('status', NEW.status));
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_period_guard_v1
+BEFORE INSERT ON periods
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:invalid-period')
+    WHERE NEW.year < 1900 OR NEW.year > 9999 OR NEW.year <> CAST(NEW.year AS INTEGER)
+      OR NEW.month NOT BETWEEN 1 AND 12 OR NEW.month <> CAST(NEW.month AS INTEGER);
+  SELECT RAISE(ABORT, 'ledger:period-not-ended')
+    WHERE printf('%04d-%02d', NEW.year, NEW.month) >= strftime('%Y-%m', 'now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_period_audit_v1
+AFTER INSERT ON periods
+BEGIN
+  INSERT INTO audit_log(actor, actor_kind, action, entity, after_json)
+    VALUES(NEW.locked_by, COALESCE(NEW.locked_by_kind, 'system'), 'period.lock', 'period',
+      json_object('year', NEW.year, 'month', NEW.month, 'locked_at', NEW.locked_at,
+        'locked_by', NEW.locked_by, 'locked_by_kind', NEW.locked_by_kind));
+END;

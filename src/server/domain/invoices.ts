@@ -1,9 +1,9 @@
 import { get, query, run } from "../db";
 import { record, type Actor } from "./audit";
 import { getCompany } from "./company";
-import { LedgerError } from "./errors";
+import { LedgerError, rethrowLedgerError } from "./errors";
 import { assertPeriodOpen } from "./periods";
-import { createFromInvoice as createJournalFromInvoice, reverseEntriesForInvoice } from "./journals";
+import { createFromInvoice as createJournalFromInvoice } from "./journals";
 import { getParty } from "./parties";
 import { nextNumber, type NumberingScope } from "./numbering";
 import { computeVat } from "./vat";
@@ -184,17 +184,25 @@ export async function setStatus(id: number, status: InvoiceStatus, actor: Actor)
   if (!SETTABLE_STATUSES.has(status)) {
     throw new LedgerError(`Cannot set an invoice to '${status}'. Valid transitions are sent, paid, or cancelled.`);
   }
-  // Reverse first: it is the step that can be refused (a locked period), and
-  // doing it before the status write means a refusal leaves nothing changed.
-  if (status === "cancelled") {
-    await reverseEntriesForInvoice(id, actor);
+  if (before.status === "cancelled" && status !== "cancelled") {
+    throw new LedgerError("A cancelled invoice cannot be sent or paid. Create a new invoice instead.");
   }
-  await run(
-    `UPDATE invoices SET status = ?, updated_at = datetime('now') WHERE id = ?`,
-    [status, id],
-  );
+  try {
+    // SQLite owns reversal, period checks and status audit in this statement.
+    // Its conditional write makes retries/no-op requests produce no audit.
+    await run(
+      `UPDATE invoices SET status = ?, mutation_actor = ?, mutation_actor_kind = ?,
+         updated_at = datetime('now')
+       WHERE id = ? AND status IN ('issued','sent','paid') AND status <> ?`,
+      [status, actor.actor, actor.actor_kind, id, status],
+    );
+  } catch (error) {
+    rethrowLedgerError(error);
+  }
   const after = await getInvoice(id);
-  await record(actor, "invoice.status", "invoice", id, { status: before.status }, { status });
+  if (after?.status === "cancelled" && status !== "cancelled") {
+    throw new LedgerError("A cancelled invoice cannot be sent or paid. Create a new invoice instead.");
+  }
   return after;
 }
 

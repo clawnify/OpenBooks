@@ -1,6 +1,6 @@
 import { get, query, run } from "../db";
-import { record, type Actor } from "./audit";
-import { LedgerError } from "./errors";
+import { type Actor } from "./audit";
+import { LedgerError, rethrowLedgerError } from "./errors";
 
 export interface Period {
   year: number;
@@ -61,21 +61,19 @@ export async function lockPeriod(year: number, month: number, actor: Actor): Pro
       `${year}-${String(month).padStart(2, "0")} has not ended yet. A period can only be locked once its month is over.`,
     );
   }
-  const existing = await get<Period>(
-    "SELECT * FROM periods WHERE year = ? AND month = ?",
-    [year, month],
-  );
-  if (existing) return existing;
-
-  await run(
-    "INSERT INTO periods (year, month, locked_by, locked_by_kind) VALUES (?, ?, ?, ?)",
-    [year, month, actor.actor, actor.actor_kind],
-  );
+  try {
+    await run(
+      `INSERT INTO periods (year, month, locked_by, locked_by_kind) VALUES (?, ?, ?, ?)
+       ON CONFLICT(year, month) DO NOTHING`,
+      [year, month, actor.actor, actor.actor_kind],
+    );
+  } catch (error) {
+    rethrowLedgerError(error);
+  }
   const locked = await get<Period>(
     "SELECT * FROM periods WHERE year = ? AND month = ?",
     [year, month],
   );
   if (!locked) throw new Error("Failed to load locked period");
-  await record(actor, "period.lock", "period", null, null, locked);
   return locked;
 }
