@@ -1,5 +1,5 @@
 import { get, query, run } from "../db";
-import { type Actor } from "./audit";
+import type { Actor } from "./audit";
 import { LedgerError, rethrowLedgerError } from "./errors";
 
 export interface Period {
@@ -8,35 +8,6 @@ export interface Period {
   locked_at: string;
   locked_by: string | null;
   locked_by_kind: string | null;
-}
-
-/** Split a 'YYYY-MM-DD' date into the period it belongs to. */
-export function periodOf(date: string): { year: number; month: number } {
-  return { year: Number(date.slice(0, 4)), month: Number(date.slice(5, 7)) };
-}
-
-export async function isPeriodLocked(date: string): Promise<boolean> {
-  const { year, month } = periodOf(date);
-  const row = await get<{ year: number }>(
-    "SELECT year FROM periods WHERE year = ? AND month = ?",
-    [year, month],
-  );
-  return !!row;
-}
-
-/**
- * Refuse a write whose entry date falls in a closed period. Called on every
- * path that puts something into the ledger, so a back-dated document cannot
- * slip into a month that has already been reported.
- */
-export async function assertPeriodOpen(date: string, what: string): Promise<void> {
-  if (await isPeriodLocked(date)) {
-    const { year, month } = periodOf(date);
-    throw new LedgerError(
-      `${what} is dated ${date}, but ${year}-${String(month).padStart(2, "0")} is locked. ` +
-        `Post it into an open period instead -- a locked period cannot be reopened.`,
-    );
-  }
 }
 
 export async function listPeriods(): Promise<Period[]> {

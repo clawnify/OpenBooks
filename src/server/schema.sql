@@ -153,14 +153,12 @@ CREATE TABLE IF NOT EXISTS journal_entries (
   source_id INTEGER,
   -- Triggers publish pending entries with their lines and audit in one statement.
   status TEXT NOT NULL DEFAULT 'posted',
-  reverses_entry_id INTEGER,
-  reversed_by_entry_id INTEGER,
+  reverses_entry_id INTEGER REFERENCES journal_entries(id),
+  reversed_by_entry_id INTEGER REFERENCES journal_entries(id),
   mutation_actor TEXT,
   mutation_actor_kind TEXT,
   posted_at TEXT NOT NULL DEFAULT (datetime('now')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (reverses_entry_id) REFERENCES journal_entries(id),
-  FOREIGN KEY (reversed_by_entry_id) REFERENCES journal_entries(id)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS journal_lines (
@@ -400,4 +398,89 @@ BEGIN
     VALUES(NEW.locked_by, COALESCE(NEW.locked_by_kind, 'system'), 'period.lock', 'period',
       json_object('year', NEW.year, 'month', NEW.month, 'locked_at', NEW.locked_at,
         'locked_by', NEW.locked_by, 'locked_by_kind', NEW.locked_by_kind));
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_issue_v1
+AFTER UPDATE OF status ON invoices
+WHEN OLD.status = 'draft' AND NEW.status = 'issued'
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:invalid-date')
+    WHERE COALESCE(NEW.issue_date, date('now')) NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+       OR COALESCE(NEW.issue_date, date('now')) < '1900-01-01'
+       OR date(COALESCE(NEW.issue_date, date('now')), '+0 days') IS NOT COALESCE(NEW.issue_date, date('now'));
+  -- Numbering uses the current UTC year, including for a backdated document.
+  INSERT INTO numbering_sequences(scope, year, next_number, prefix)
+    SELECT NEW.type, CAST(strftime('%Y', 'now') AS INTEGER), 1, prefix FROM (
+      SELECT 'invoice' AS scope, 'INV' AS prefix
+      UNION ALL SELECT 'credit_note', 'CN'
+      UNION ALL SELECT 'quote', 'Q'
+    ) WHERE scope = NEW.type
+    ON CONFLICT(scope, year) DO NOTHING;
+  UPDATE numbering_sequences SET next_number = next_number + 1
+    WHERE scope = NEW.type AND year = CAST(strftime('%Y', 'now') AS INTEGER);
+  UPDATE invoices SET number = (SELECT prefix || '-' || year || '-' || printf('%04d', next_number - 1)
+      FROM numbering_sequences WHERE scope = NEW.type AND year = CAST(strftime('%Y', 'now') AS INTEGER))
+    WHERE id = NEW.id;
+  INSERT INTO journal_entries(reference, description, date, source_type, source_id, status,
+      mutation_actor, mutation_actor_kind)
+    SELECT number, type || ' ' || number, issue_date, type, id, 'pending',
+      NEW.mutation_actor, NEW.mutation_actor_kind
+      FROM invoices WHERE id = NEW.id AND type IN ('invoice','credit_note');
+  INSERT INTO audit_log(actor, actor_kind, action, entity, entity_id, before_json, after_json)
+    SELECT NEW.mutation_actor, COALESCE(NEW.mutation_actor_kind, 'system'),
+      'invoice.issue', 'invoice', id, json_object('status', OLD.status),
+      json_object('id', id, 'number', number, 'type', type, 'status', status,
+        'party_id', party_id, 'issue_date', issue_date, 'due_date', due_date,
+        'currency', currency, 'fx_rate', fx_rate, 'subtotal_cents', subtotal_cents,
+        'vat_cents', vat_cents, 'total_cents', total_cents, 'reverse_charge', reverse_charge,
+        'reference', reference, 'notes', notes, 'created_at', created_at, 'updated_at', updated_at)
+      FROM invoices WHERE id = NEW.id;
+END;
+
+-- An invoice.delete audit INSERT is the deletion command: its actor and
+-- before-snapshot cannot be separated from the DELETE by another request.
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_delete_v1
+AFTER INSERT ON audit_log
+WHEN NEW.action = 'invoice.delete' AND NEW.entity = 'invoice'
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:issued-delete')
+    WHERE NOT EXISTS (SELECT 1 FROM invoices WHERE id = NEW.entity_id AND status = 'draft');
+  DELETE FROM invoices WHERE id = NEW.entity_id;
+END;
+
+-- A draft edit that passed application validation may race an issue request.
+-- Refuse its eventual write against the current status, not the old snapshot.
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_freeze_v1
+BEFORE UPDATE ON invoices
+WHEN OLD.status <> 'draft' AND (
+  OLD.type IS NOT NEW.type OR OLD.party_id IS NOT NEW.party_id
+  OR OLD.issue_date IS NOT NEW.issue_date OR OLD.due_date IS NOT NEW.due_date
+  OR OLD.currency IS NOT NEW.currency OR OLD.fx_rate IS NOT NEW.fx_rate
+  OR OLD.subtotal_cents IS NOT NEW.subtotal_cents OR OLD.vat_cents IS NOT NEW.vat_cents
+  OR OLD.total_cents IS NOT NEW.total_cents OR OLD.reverse_charge IS NOT NEW.reverse_charge
+  OR OLD.reference IS NOT NEW.reference OR OLD.notes IS NOT NEW.notes
+)
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:frozen-invoice');
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_line_insert_guard_v1
+BEFORE INSERT ON invoice_lines
+WHEN EXISTS (SELECT 1 FROM invoices WHERE id = NEW.invoice_id AND status <> 'draft')
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:frozen-invoice');
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_line_update_guard_v1
+BEFORE UPDATE ON invoice_lines
+WHEN EXISTS (SELECT 1 FROM invoices WHERE id IN (OLD.invoice_id, NEW.invoice_id) AND status <> 'draft')
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:frozen-invoice');
+END;
+
+CREATE TRIGGER IF NOT EXISTS ledger_invoice_line_delete_guard_v1
+BEFORE DELETE ON invoice_lines
+WHEN EXISTS (SELECT 1 FROM invoices WHERE id = OLD.invoice_id AND status <> 'draft')
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:frozen-invoice');
 END;

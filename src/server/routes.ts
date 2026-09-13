@@ -20,7 +20,7 @@ import {
 } from "./domain/invoices";
 import { getCompany, updateCompany } from "./domain/company";
 import { actorOf, listAudit } from "./domain/audit";
-import { LedgerError } from "./domain/errors";
+import { LedgerError, ledgerErrorFromSQL } from "./domain/errors";
 import { listPeriods, lockPeriod } from "./domain/periods";
 import { backfillFromInvoices, getEntry, listEntries, trialBalance } from "./domain/journals";
 import { balanceSheet, profitLoss } from "./domain/reports";
@@ -35,7 +35,8 @@ const api = new Hono();
 // into a 409 here so every route reports it the same way, with the message the
 // domain wrote (agents call these routes directly and act on that text).
 api.onError((err, c) => {
-  if (err instanceof LedgerError) return c.json({ error: err.message }, 409);
+  const refusal = err instanceof LedgerError ? err : ledgerErrorFromSQL(err);
+  if (refusal) return c.json({ error: refusal.message }, 409);
   if (err instanceof HTTPException) {
     const response = err.getResponse();
     return c.newResponse(response.body, response);

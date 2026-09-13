@@ -1,11 +1,8 @@
 import { get, query, run } from "../db";
-import { record, type Actor } from "./audit";
+import type { Actor } from "./audit";
 import { getCompany } from "./company";
 import { LedgerError, rethrowLedgerError } from "./errors";
-import { assertPeriodOpen } from "./periods";
-import { createFromInvoice as createJournalFromInvoice } from "./journals";
 import { getParty } from "./parties";
-import { nextNumber, type NumberingScope } from "./numbering";
 import { computeVat } from "./vat";
 
 export type InvoiceType = "invoice" | "credit_note" | "quote";
@@ -131,41 +128,39 @@ export async function deleteInvoice(id: number, actor: Actor): Promise<void> {
         `Cancel it instead -- that reverses its journal entry and leaves both on the record.`,
     );
   }
-  // A draft was never posted, so there is nothing in the ledger to reverse.
-  await run("DELETE FROM invoice_lines WHERE invoice_id = ?", [id]);
-  await run("DELETE FROM invoices WHERE id = ?", [id]);
-  await record(actor, "invoice.delete", "invoice", id, inv, null);
+  try {
+    // The audit INSERT captures the current row and deletes it in one trigger
+    // transaction. A concurrent issue is refused before either effect commits.
+    await run(
+      `INSERT INTO audit_log(actor, actor_kind, action, entity, entity_id, before_json)
+       SELECT ?, ?, 'invoice.delete', 'invoice', id,
+         json_object('id', id, 'number', number, 'type', type, 'status', status,
+           'party_id', party_id, 'issue_date', issue_date, 'due_date', due_date,
+           'currency', currency, 'fx_rate', fx_rate, 'subtotal_cents', subtotal_cents,
+           'vat_cents', vat_cents, 'total_cents', total_cents, 'reverse_charge', reverse_charge,
+           'reference', reference, 'notes', notes, 'created_at', created_at, 'updated_at', updated_at)
+       FROM invoices WHERE id = ?`,
+      [actor.actor, actor.actor_kind, id],
+    );
+  } catch (error) {
+    rethrowLedgerError(error);
+  }
 }
 
-const SCOPE_FOR_TYPE: Record<InvoiceType, NumberingScope> = {
-  invoice: "invoice",
-  credit_note: "credit_note",
-  quote: "quote",
-};
-
 export async function issueInvoice(id: number, actor: Actor): Promise<Invoice | undefined> {
-  const inv = await getInvoice(id);
-  if (!inv) return undefined;
-  if (inv.status !== "draft") return inv;
-  const today = new Date().toISOString().slice(0, 10);
-  // Check the period before anything is written. Issuing assigns a number from
-  // a gap-free sequence and posts to the ledger; if the posting were refused
-  // afterwards the invoice would be left issued, numbered and unposted.
-  await assertPeriodOpen(inv.issue_date ?? today, `Invoice ${id}`);
-  const number = await nextNumber(SCOPE_FOR_TYPE[inv.type]);
-  await run(
-    `UPDATE invoices
-       SET number = ?,
-           status = 'issued',
-           issue_date = COALESCE(issue_date, ?),
-           updated_at = datetime('now')
-     WHERE id = ?`,
-    [number, today, id],
-  );
-  await createJournalFromInvoice(id, actor);
-  const issued = await getInvoice(id);
-  await record(actor, "invoice.issue", "invoice", id, { status: inv.status }, issued);
-  return issued;
+  try {
+    // Number assignment, journal publication and both audits belong to this
+    // conditional statement. Retry after a lost response consumes no number.
+    await run(
+      `UPDATE invoices SET status = 'issued', mutation_actor = ?, mutation_actor_kind = ?,
+         issue_date = COALESCE(issue_date, date('now')),
+         updated_at = datetime('now') WHERE id = ? AND status = 'draft'`,
+      [actor.actor, actor.actor_kind, id],
+    );
+  } catch (error) {
+    rethrowLedgerError(error);
+  }
+  return getInvoice(id);
 }
 
 const SETTABLE_STATUSES = new Set<InvoiceStatus>(["sent", "paid", "cancelled"]);

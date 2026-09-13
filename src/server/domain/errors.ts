@@ -23,11 +23,16 @@ const SQL_REFUSALS: Record<string, string> = {
   "empty-invoice": "Add at least one line before posting an invoice.",
   "unbalanced-entry": "The journal entry must have lines with equal total debits and credits.",
   "invalid-transition": "That invoice status transition is not allowed. A cancelled invoice stays cancelled.",
+  "issued-delete": "An issued invoice cannot be deleted. Cancel it instead to reverse its journal entry.",
+  "frozen-invoice": "An issued invoice and its lines can no longer be edited. Cancel it or raise a credit note instead.",
 };
 
 /** Only our explicit SQLite refusals are conflicts; storage faults remain 500s. */
-export function rethrowLedgerError(error: unknown): never {
+export function ledgerErrorFromSQL(error: unknown): LedgerError | undefined {
   const marker = error instanceof Error ? /\bledger:([a-z-]+)\b/.exec(error.message)?.[1] : undefined;
-  if (marker && SQL_REFUSALS[marker]) throw new LedgerError(SQL_REFUSALS[marker]);
-  throw error;
+  return marker && SQL_REFUSALS[marker] ? new LedgerError(SQL_REFUSALS[marker]) : undefined;
+}
+
+export function rethrowLedgerError(error: unknown): never {
+  throw ledgerErrorFromSQL(error) ?? error;
 }

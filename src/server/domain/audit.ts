@@ -1,5 +1,5 @@
 import { caller, user, type Caller, type RequestLike } from "@clawnify/app";
-import { query, run } from "../db";
+import { query } from "../db";
 
 /**
  * Who is making a change, as recorded in the books.
@@ -38,36 +38,6 @@ export interface AuditRow {
   after_json: string | null;
 }
 
-/**
- * Append one line to the audit log.
- *
- * Deliberately allowed to throw. If the books can be changed without the change
- * being recorded, the log is worth nothing -- a loud failure is the honest
- * outcome, not a silent unrecorded write.
- */
-export async function record(
-  actor: Actor,
-  action: string,
-  entity: string,
-  entityId: number | null,
-  before?: unknown,
-  after?: unknown,
-): Promise<void> {
-  await run(
-    `INSERT INTO audit_log (actor, actor_kind, action, entity, entity_id, before_json, after_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [
-      actor.actor,
-      actor.actor_kind,
-      action,
-      entity,
-      entityId,
-      before === undefined ? null : JSON.stringify(before),
-      after === undefined ? null : JSON.stringify(after),
-    ],
-  );
-}
-
 export async function listAudit(filters: { entity?: string; entity_id?: number; limit?: number } = {}): Promise<AuditRow[]> {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -76,7 +46,7 @@ export async function listAudit(filters: { entity?: string; entity_id?: number; 
   // ?? only falls back on null/undefined, so an unparsable `limit` (Number("abc")
   // is NaN, not undefined) would otherwise reach the query below as `LIMIT NaN`.
   const requested = Number.isFinite(filters.limit) ? (filters.limit as number) : 200;
-  const limit = Math.min(Math.max(requested, 1), 1000);
+  const limit = Math.min(Math.max(Math.trunc(requested), 1), 1000);
   return query<AuditRow>(
     `SELECT * FROM audit_log ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC LIMIT ${limit}`,
     params,

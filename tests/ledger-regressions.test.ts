@@ -5,7 +5,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { initDB } from "../src/server/db";
-import { setStatus } from "../src/server/domain/invoices";
+import { issueInvoice, setStatus } from "../src/server/domain/invoices";
 import { backfillFromInvoices, createFromInvoice, trialBalance } from "../src/server/domain/journals";
 import { lockPeriod } from "../src/server/domain/periods";
 import { LedgerError } from "../src/server/domain/errors";
@@ -149,10 +149,16 @@ test("cancelled invoices cannot become sent or paid, including a stale concurren
   await assertCancelledBooks();
 });
 
-function unpostedInvoice() {
-  db.exec(`DELETE FROM journal_lines; DELETE FROM journal_entries;
+function unpostedInvoice(date = "2025-01-10") {
+  // Model data written before freeze guards existed; restore the full schema
+  // before invoking any operation under test.
+  db.exec(`DROP TRIGGER ledger_invoice_line_insert_guard_v1;
+    DROP TRIGGER ledger_invoice_freeze_v1;
+    DELETE FROM journal_lines; DELETE FROM journal_entries;
     INSERT INTO invoice_lines(invoice_id, position, description, subtotal_cents, total_cents, vat_cents)
       VALUES(1, 1, 'Work', 10000, 10000, 0);`);
+  db.prepare("UPDATE invoices SET issue_date = ? WHERE id = 1").run(date);
+  db.exec(readFileSync(new URL("../src/server/schema.sql", import.meta.url), "utf8"));
 }
 
 test("concurrent backfill publishes one complete original and one audit", async () => {
@@ -180,8 +186,7 @@ for (const action of ["BEFORE INSERT ON journal_lines", "BEFORE INSERT ON audit_
 
 for (const date of ["2025-02-29", "2024-02-30", "2025-13-01", "2025-1-01", "2025-01-01T00:00:00Z", "1899-12-31"]) {
   test(`publication refuses invalid accounting date ${date}`, async () => {
-    unpostedInvoice();
-    db.prepare("UPDATE invoices SET issue_date = ? WHERE id = 1").run(date);
+    unpostedInvoice(date);
     await assert.rejects(createFromInvoice(1, actor), LedgerError);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()?.n, 0);
   });
@@ -202,6 +207,45 @@ test("a lock committed while posting waits prevents any publication", async () =
   release();
   await assert.rejects(posting, LedgerError);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()?.n, 0);
+});
+
+function draftForIssue(type = "invoice") {
+  db.exec("DELETE FROM journal_lines; DELETE FROM journal_entries; DELETE FROM invoices;");
+  db.prepare(`INSERT INTO invoices(id, type, party_id, issue_date, subtotal_cents, total_cents)
+    VALUES(1, ?, 1, '2025-01-10', 10000, 10000)`).run(type);
+  db.exec(`INSERT INTO invoice_lines(invoice_id, position, description, subtotal_cents, total_cents, vat_cents)
+    VALUES(1, 1, 'Work', 10000, 10000, 0);`);
+}
+
+test("issue retains a custom prefix and does not truncate sequence numbers over 9999", async () => {
+  draftForIssue();
+  const year = new Date().getUTCFullYear();
+  db.prepare("INSERT INTO numbering_sequences(scope, year, next_number, prefix) VALUES('invoice', ?, 10001, 'CUSTOM')").run(year);
+  const issued = await issueInvoice(1, actor);
+  assert.equal(issued?.number, `CUSTOM-${year}-10001`);
+  assert.equal((await issueInvoice(1, actor))?.number, issued?.number);
+  assert.equal(db.prepare("SELECT next_number FROM numbering_sequences").get()?.next_number, 10002);
+});
+
+test("a quote in a locked month still receives a number without changing the ledger", async () => {
+  draftForIssue("quote");
+  await lockPeriod(2025, 1, actor);
+  const issued = await issueInvoice(1, actor);
+  assert.equal(issued?.number, `Q-${new Date().getUTCFullYear()}-0001`);
+  assert.equal(issued?.status, "issued");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()?.n, 0);
+});
+
+test("valid leap day is accepted", async () => {
+  unpostedInvoice("2024-02-29");
+  assert.equal((await createFromInvoice(1, actor))?.date, "2024-02-29");
+});
+
+test("audit endpoint accepts a fractional limit and returns a whole number of rows", async () => {
+  await setStatus(1, "cancelled", actor);
+  const response = await api.request("/api/audit?limit=1.5");
+  assert.equal(response.status, 200);
+  assert.equal((await response.json() as unknown[]).length, 1);
 });
 
 for (const mounted of [false, true]) {
