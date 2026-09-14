@@ -66,11 +66,11 @@ export async function createParty(input: PartyInput): Promise<Party> {
       params.push(value);
     }
   }
-  const result = await run(
-    `INSERT INTO parties (${cols.join(", ")}) VALUES (${placeholders.join(", ")})`,
+  const inserted = await query<{ id: number }>(
+    `INSERT INTO parties (${cols.join(", ")}) VALUES (${placeholders.join(", ")}) RETURNING id`,
     params,
   );
-  const created = await getParty(result.lastInsertRowid);
+  const created = await getParty(inserted[0].id);
   if (!created) throw new Error("Failed to load created party");
   return created;
 }

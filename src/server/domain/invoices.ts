@@ -85,9 +85,9 @@ export interface CreateDraftInput {
 }
 
 export async function createDraft(input: CreateDraftInput): Promise<Invoice> {
-  const result = await run(
+  const inserted = await query<{ id: number }>(
     `INSERT INTO invoices (type, party_id, currency, reference, notes)
-     VALUES (?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?) RETURNING id`,
     [
       input.type ?? "invoice",
       input.party_id,
@@ -96,7 +96,7 @@ export async function createDraft(input: CreateDraftInput): Promise<Invoice> {
       input.notes ?? null,
     ],
   );
-  const created = await getInvoice(result.lastInsertRowid);
+  const created = await getInvoice(inserted[0].id);
   if (!created) throw new Error("Failed to load created invoice");
   return created;
 }
@@ -245,10 +245,10 @@ export async function addLine(invoiceId: number, input: LineInput): Promise<Invo
     [invoiceId],
   );
   const position = input.position ?? ((maxRow?.max_pos ?? 0) + 1);
-  const result = await run(
+  const inserted = await query<{ id: number }>(
     `INSERT INTO invoice_lines
        (invoice_id, position, product_id, description, quantity, unit, unit_price_cents, vat_rate, account_code)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     [
       invoiceId,
       position,
@@ -262,7 +262,7 @@ export async function addLine(invoiceId: number, input: LineInput): Promise<Invo
     ],
   );
   await recomputeTotals(invoiceId);
-  return get<InvoiceLine>("SELECT * FROM invoice_lines WHERE id = ?", [result.lastInsertRowid]);
+  return get<InvoiceLine>("SELECT * FROM invoice_lines WHERE id = ?", [inserted[0].id]);
 }
 
 export async function updateLine(lineId: number, input: LineInput): Promise<InvoiceLine | undefined> {

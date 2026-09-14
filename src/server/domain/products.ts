@@ -60,11 +60,11 @@ export async function createProduct(input: ProductInput): Promise<Product> {
       params.push(value);
     }
   }
-  const result = await run(
-    `INSERT INTO products (${cols.join(", ")}) VALUES (${placeholders.join(", ")})`,
+  const inserted = await query<{ id: number }>(
+    `INSERT INTO products (${cols.join(", ")}) VALUES (${placeholders.join(", ")}) RETURNING id`,
     params,
   );
-  const created = await getProduct(result.lastInsertRowid);
+  const created = await getProduct(inserted[0].id);
   if (!created) throw new Error("Failed to load created product");
   return created;
 }
