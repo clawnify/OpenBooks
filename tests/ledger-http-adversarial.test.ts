@@ -130,6 +130,86 @@ function check(
     }
   });
 }
+
+for (const creation of [
+  { table: "parties", path: "/api/parties", field: "name", input: (i: number) => ({ kind: "customer", name: `Customer ${i}` }) },
+  { table: "products", path: "/api/products", field: "name", input: (i: number) => ({ name: `Product ${i}`, price_cents: 1000 + i }) },
+  { table: "invoices", path: "/api/invoices", field: "reference", input: (i: number) => ({ party_id: 1, reference: `Order ${i}` }) },
+  { table: "invoice_lines", path: "/api/invoices/1/lines", field: "description", input: (i: number) => ({ description: `Line ${i}`, quantity: 1, unit_price_cents: 1000 + i, vat_rate: 0 }) },
+]) {
+  check(`20 concurrent ${creation.table} creations return their own saved rows without storage metadata`, async (t) => {
+    if (creation.table === "invoice_lines") await t.draft();
+    const before = (await t.q(`SELECT COUNT(*) n FROM ${creation.table}`))[0].n;
+    const inputs = Array.from({ length: 20 }, (_, i) => creation.input(i));
+    const responses = await Promise.all(inputs.map((input) => t.req(creation.path, "POST", input)));
+    const ids = new Set<number>();
+    for (const [i, response] of responses.entries()) {
+      assert.equal(response.status, 201, JSON.stringify(response));
+      assert.ok(Number.isInteger(response.body.id) && response.body.id > 0);
+      assert.equal(response.body[creation.field], inputs[i][creation.field]);
+      const rows = await t.q(`SELECT * FROM ${creation.table} WHERE id = ?`, [response.body.id]);
+      assert.equal(rows.length, 1);
+      assert.deepEqual(response.body, { ...rows[0] });
+      ids.add(response.body.id);
+    }
+    assert.equal(ids.size, inputs.length);
+    assert.equal((await t.q(`SELECT COUNT(*) n FROM ${creation.table}`))[0].n, before + inputs.length);
+  });
+}
+
+check("HTTP-created customer, product, draft and line can be issued with recomputed totals", async (t) => {
+  const party = await t.req("/api/parties", "POST", { kind: "customer", name: "New customer" });
+  assert.equal(party.status, 201, JSON.stringify(party));
+  const product = await t.req("/api/products", "POST", { name: "Consulting", price_cents: 10000, vat_rate: 21 });
+  assert.equal(product.status, 201, JSON.stringify(product));
+  const draft = await t.req("/api/invoices", "POST", { party_id: party.body.id, reference: "New order" });
+  assert.equal(draft.status, 201, JSON.stringify(draft));
+  assert.equal(draft.body.status, "draft");
+  assert.equal(draft.body.number, null);
+  const id = draft.body.id;
+  const line = await t.req(`/api/invoices/${id}/lines`, "POST", {
+    product_id: product.body.id, description: product.body.name,
+    quantity: 2.5, unit_price_cents: product.body.price_cents, vat_rate: product.body.vat_rate, account_code: "WOmz",
+  });
+  assert.equal(line.status, 201, JSON.stringify(line));
+  assert.equal(line.body.invoice_id, id);
+  assert.equal(line.body.product_id, product.body.id);
+  assert.equal(line.body.subtotal_cents, 25000);
+  assert.equal(line.body.vat_cents, 5250);
+  assert.equal(line.body.total_cents, 30250);
+  const issued = await t.issue(id);
+  assert.equal(issued.status, 200, JSON.stringify(issued));
+  assert.equal(issued.body.status, "issued");
+  assert.ok(issued.body.number);
+  assert.equal(issued.body.total_cents, 30250);
+  assert.equal(await t.ar(), 30250);
+  assert.equal((await t.q("SELECT SUM(debit_cents-credit_cents) n FROM journal_lines"))[0].n, 0);
+  assert.equal((await t.q("SELECT COUNT(*) n FROM journal_entries WHERE source_id = ? AND status = 'posted'", [id]))[0].n, 1);
+  const frozen = await t.req(`/api/invoices/${id}/lines`, "POST", { description: "Late line", unit_price_cents: 100 });
+  assert.equal(frozen.status, 409);
+  assert.equal((await t.q("SELECT COUNT(*) n FROM invoice_lines WHERE invoice_id = ?", [id]))[0].n, 1);
+});
+
+check("a draft created through HTTP remains unchanged when issue is refused by a locked period", async (t) => {
+  const draft = await t.req("/api/invoices", "POST", { party_id: 1 });
+  assert.equal(draft.status, 201, JSON.stringify(draft));
+  const id = draft.body.id;
+  const line = await t.req(`/api/invoices/${id}/lines`, "POST", {
+    description: "Closed-month work", quantity: 1, unit_price_cents: 10000, vat_rate: 0, account_code: "WOmz",
+  });
+  assert.equal(line.status, 201, JSON.stringify(line));
+  assert.equal((await t.req(`/api/invoices/${id}`, "PATCH", { issue_date: "2025-01-10" })).status, 200);
+  assert.equal((await t.req("/api/periods/2025/1/lock")).status, 200);
+  const before = await t.snapshot();
+  const refused = await t.issue(id);
+  assert.equal(refused.status, 409, JSON.stringify(refused));
+  assert.deepEqual(await t.snapshot(), before);
+  const invoice = await t.req(`/api/invoices/${id}`, "GET");
+  assert.equal(invoice.body.status, "draft");
+  assert.equal(invoice.body.number, null);
+  assert.equal(invoice.body.total_cents, 10000);
+});
+
 check("invoice issue has balanced complete ledger and audits", async (t) => {
   await t.draft();
   const r = await t.issue();
