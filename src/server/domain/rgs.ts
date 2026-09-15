@@ -64,10 +64,10 @@ export async function loadStarter(): Promise<{ inserted: number; total: number }
   const entries = (starter as { accounts: StarterEntry[] }).accounts;
   let inserted = 0;
   for (const a of entries) {
-    const result = await run(
+    const rows = await query<{ rgs_code: string }>(
       `INSERT OR REPLACE INTO accounts
         (rgs_code, reknr, parent_code, nivo, omskort, omslang, dc, bw, sortimentcode, is_leaf)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING rgs_code`,
       [
         a.rgs_code,
         a.reknr ?? null,
@@ -81,7 +81,7 @@ export async function loadStarter(): Promise<{ inserted: number; total: number }
         a.reknr ? 1 : 0,
       ],
     );
-    inserted += result.changes;
+    inserted += rows.length;
   }
   const total = (await get<{ c: number }>("SELECT COUNT(*) AS c FROM accounts"))?.c ?? 0;
   return { inserted, total };
