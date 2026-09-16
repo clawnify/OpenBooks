@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { ConfirmButton } from "../notice";
+import { refused } from "../refusal";
 
 interface AccountNode {
   rgs_code: string;
@@ -35,9 +37,8 @@ export function AccountsPage() {
   }
 
   async function clearAll() {
-    if (!confirm("Clear all accounts?")) return;
     setLoading(true);
-    await fetch("/api/accounts", { method: "DELETE" });
+    await refused(await fetch("/api/accounts", { method: "DELETE" }));
     await load();
     setLoading(false);
   }
@@ -56,13 +57,15 @@ export function AccountsPage() {
           {count === 0 ? "Load starter chart" : "Reload starter chart"}
         </button>
         {count !== null && count > 0 && (
-          <button
-            onClick={clearAll}
+          <ConfirmButton
+            prompt="Clear all accounts?"
+            confirmLabel="Clear"
+            onConfirm={clearAll}
             disabled={loading}
             className="px-3 py-1.5 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
           >
             Clear
-          </button>
+          </ConfirmButton>
         )}
         {count !== null && (
           <span className="text-xs text-gray-400 ml-auto">{count} accounts</span>

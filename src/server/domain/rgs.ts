@@ -1,4 +1,5 @@
 import { get, query, run } from "../db";
+import { LedgerError } from "./errors";
 import starter from "./rgs-starter.json";
 
 export interface Account {
@@ -88,5 +89,10 @@ export async function loadStarter(): Promise<{ inserted: number; total: number }
 }
 
 export async function clearAccounts(): Promise<void> {
+  // Posted entries keep their accounts forever, so the chart cannot be cleared
+  // under them. Say so instead of failing on the foreign key.
+  if (await get("SELECT 1 FROM journal_lines LIMIT 1")) {
+    throw new LedgerError("The chart is used by posted journal entries, so it cannot be cleared. Reload the starter chart to restore account names instead.");
+  }
   await run("DELETE FROM accounts");
 }

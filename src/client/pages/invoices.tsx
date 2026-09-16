@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ConfirmButton } from "../notice";
 import { refused } from "../refusal";
 import { Link, navigate } from "../router";
 
@@ -74,7 +75,6 @@ export function InvoicesPage() {
   }
 
   async function remove(id: number) {
-    if (!confirm("Delete this draft (and all lines)?")) return;
     const res = await fetch(`/api/invoices/${id}`, { method: "DELETE" });
     if (await refused(res)) return;
     load();
@@ -170,7 +170,7 @@ export function InvoicesPage() {
                   </button>
                 )}
                 {inv.status === "draft" && (
-                  <button onClick={() => remove(inv.id)} className="text-gray-300 hover:text-red-600 text-lg leading-none px-1" title="Delete draft">×</button>
+                  <ConfirmButton prompt="Delete this draft and its lines?" onConfirm={() => remove(inv.id)} className="text-gray-300 hover:text-red-600 text-lg leading-none px-1" title="Delete draft">×</ConfirmButton>
                 )}
               </div>
             </li>

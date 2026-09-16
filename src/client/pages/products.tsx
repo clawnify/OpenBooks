@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ConfirmButton } from "../notice";
 
 type ProductKind = "good" | "service";
 
@@ -49,7 +50,6 @@ export function ProductsPage() {
   useEffect(() => { load(); }, [q]);
 
   async function remove(id: number) {
-    if (!confirm("Delete this product?")) return;
     await fetch(`/api/products/${id}`, { method: "DELETE" });
     load();
   }
@@ -114,12 +114,14 @@ export function ProductsPage() {
               >
                 Edit
               </button>
-              <button
-                onClick={() => remove(p.id)}
+              <ConfirmButton
+                prompt="Delete this product?"
+                onConfirm={() => remove(p.id)}
                 className="text-gray-300 hover:text-red-600 text-lg leading-none px-1"
+                title="Delete"
               >
                 ×
-              </button>
+              </ConfirmButton>
             </li>
           ))}
         </ul>
