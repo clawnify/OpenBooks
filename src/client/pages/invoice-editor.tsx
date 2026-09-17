@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ConfirmButton, notify } from "../notice";
 import { refused } from "../refusal";
 import { Link, navigate } from "../router";
 
@@ -168,7 +169,7 @@ export function InvoiceEditorPage({ id }: { id: number }) {
 
   async function issue() {
     if (invoice!.lines.length === 0) {
-      alert("Add at least one line before issuing.");
+      notify("Add at least one line before issuing.");
       return;
     }
     const res = await fetch(`/api/invoices/${id}/issue`, { method: "POST" });
@@ -187,7 +188,6 @@ export function InvoiceEditorPage({ id }: { id: number }) {
   }
 
   async function remove() {
-    if (!confirm("Delete this draft?")) return;
     const res = await fetch(`/api/invoices/${id}`, { method: "DELETE" });
     if (await refused(res)) return;
     navigate("/invoices");
@@ -380,7 +380,7 @@ export function InvoiceEditorPage({ id }: { id: number }) {
           <button onClick={() => setStatus("cancelled")} className="px-3 py-1.5 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
         )}
         {invoice.status === "draft" && (
-          <button onClick={remove} className="ml-auto px-3 py-1.5 rounded-lg border border-red-200 text-sm text-red-600 hover:bg-red-50">Delete</button>
+          <span className="ml-auto"><ConfirmButton prompt="Delete this draft?" onConfirm={remove} className="px-3 py-1.5 rounded-lg border border-red-200 text-sm text-red-600 hover:bg-red-50">Delete</ConfirmButton></span>
         )}
       </section>
     </div>

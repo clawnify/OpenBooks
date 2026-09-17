@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ConfirmButton } from "../notice";
 
 type PartyKind = "customer" | "supplier" | "both";
 
@@ -38,7 +39,6 @@ export function PartiesPage({ kind }: { kind: "customer" | "supplier" }) {
   useEffect(() => { load(); }, [kind, q]);
 
   async function remove(id: number) {
-    if (!confirm("Delete this party?")) return;
     await fetch(`/api/parties/${id}`, { method: "DELETE" });
     load();
   }
@@ -109,12 +109,14 @@ export function PartiesPage({ kind }: { kind: "customer" | "supplier" }) {
               >
                 Edit
               </button>
-              <button
-                onClick={() => remove(p.id)}
+              <ConfirmButton
+                prompt="Delete this party?"
+                onConfirm={() => remove(p.id)}
                 className="text-gray-300 hover:text-red-600 text-lg leading-none px-1"
+                title="Delete"
               >
                 ×
-              </button>
+              </ConfirmButton>
             </li>
           ))}
         </ul>

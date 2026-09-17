@@ -1,3 +1,5 @@
+import { notify } from "./notice";
+
 /**
  * Surface a refused write.
  *
@@ -11,6 +13,6 @@
 export async function refused(res: Response): Promise<boolean> {
   if (res.ok) return false;
   const data = (await res.json().catch(() => ({}))) as { error?: string };
-  alert(data.error || "That change was refused.");
+  notify(data.error || "That change was refused.");
   return true;
 }

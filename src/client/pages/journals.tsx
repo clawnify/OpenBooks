@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { notify } from "../notice";
 
 interface JournalLine {
   id: number;
@@ -54,7 +55,7 @@ export function JournalsPage() {
     const data: { created: number } = await res.json();
     setBackfilling(false);
     if (data.created > 0) await load();
-    alert(`Backfilled ${data.created} journal ${data.created === 1 ? "entry" : "entries"}.`);
+    notify(`Backfilled ${data.created} journal ${data.created === 1 ? "entry" : "entries"}.`);
   }
 
   const totalDebit = trial.reduce((s, r) => s + r.debit_cents, 0);
