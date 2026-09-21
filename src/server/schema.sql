@@ -181,6 +181,21 @@ CREATE INDEX IF NOT EXISTS idx_journal_lines_account ON journal_lines(account_co
 CREATE INDEX IF NOT EXISTS idx_journal_entries_reverses ON journal_entries(reverses_entry_id);
 CREATE INDEX IF NOT EXISTS idx_journal_entries_reversed_by ON journal_entries(reversed_by_entry_id);
 
+-- Clearing the chart is one statement, so keep the refusal in SQLite: the
+-- check and delete cannot race, and D1 plus preview storage return the same
+-- named conflict instead of backend-specific foreign-key errors.
+CREATE TRIGGER IF NOT EXISTS ledger_account_delete_guard_v1
+BEFORE DELETE ON accounts
+BEGIN
+  SELECT RAISE(ABORT, 'ledger:accounts-in-use') WHERE
+    EXISTS (
+      SELECT 1 FROM products
+      WHERE income_account = OLD.rgs_code OR expense_account = OLD.rgs_code
+    )
+    OR EXISTS (SELECT 1 FROM invoice_lines WHERE account_code = OLD.rgs_code)
+    OR EXISTS (SELECT 1 FROM journal_lines WHERE account_code = OLD.rgs_code);
+END;
+
 -- A locked period is closed for good: nothing may be posted into it again.
 -- Locking is one-way on purpose -- an "unlock" would make every lock a
 -- suggestion, and the point of the lock is that it is not one.
