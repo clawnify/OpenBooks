@@ -25,6 +25,7 @@ const SQL_REFUSALS: Record<string, string> = {
   "invalid-transition": "That invoice status transition is not allowed. A cancelled invoice stays cancelled.",
   "issued-delete": "An issued invoice cannot be deleted. Cancel it instead to reverse its journal entry.",
   "frozen-invoice": "An issued invoice and its lines can no longer be edited. Cancel it or raise a credit note instead.",
+  "accounts-in-use": "The chart is used by products, invoice lines, or posted journal entries, so it cannot be cleared. Remove editable references first; posted entries keep their accounts permanently, so reload the starter chart to restore account names instead.",
 };
 
 /** Only our explicit SQLite refusals are conflicts; storage faults remain 500s. */
