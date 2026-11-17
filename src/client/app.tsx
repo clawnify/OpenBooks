@@ -55,10 +55,7 @@ export function App() {
   return (
     <div className="max-w-3xl mx-auto px-4 pb-20">
       {embedded ? (
-        <div className="pt-8">
-          <AppNav title="Books" icon="book-open" groups={HOST_NAV} active={activeNavId(path)}
-            onNavigate={(item) => item.href && navigate(item.href)} />
-        </div>
+        <div className="pt-8" />
       ) : (
       <header className="flex items-baseline gap-6 mt-8 mb-8 pb-4 border-b border-gray-100 flex-wrap">
         <Link to="/" className="text-xl font-semibold text-gray-900 hover:no-underline">
@@ -78,6 +75,11 @@ export function App() {
       )}
       <Notice />
       <main>{renderRoute(path)}</main>
+      {/* Inside Clawnify the dashboard sidebar draws HOST_NAV; anywhere else the
+          header above stays, and the notice card sits here. */}
+      <AppNav title="Books" icon="book-open" groups={HOST_NAV} active={activeNavId(path)}
+        onNavigate={(item) => item.href && navigate(item.href)}
+        standalone={(nav) => nav.card && <div className="mt-12 max-w-xs">{nav.card}</div>} />
     </div>
   );
 }
